@@ -121,7 +121,7 @@ run_experiment()
     local logfile2="${DATA_DIR}/dyn.log"
     local logfile3="${DATA_DIR}/partial.log"
 
-    local config_str=$(racket "${SCHML_DIR}/benchmark/config_str.rkt" --indices-to-names "$configs")
+    local config_str=$(racket "${SCHML_DIR}/benchmark/config_str.rkt" --indices-to-names $configs)
     echo "name,${config_str}" > "$logfile1"
     echo "name,${config_str},racket,chezscheme" > "$logfile2"
     echo "name,${config_str}" > "$logfile3"
@@ -160,8 +160,9 @@ main()
     fi
     LOOPS="$1";          shift
     local date="$1";     shift
-    configs=("$@")
+    configs="$@"
 
+    echo "$configs"
     
     if [ "$date" == "fresh" ]; then
 	declare -r DATE=`date +%Y_%m_%d_%H_%M_%S`
