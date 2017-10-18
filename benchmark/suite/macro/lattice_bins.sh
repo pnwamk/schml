@@ -427,7 +427,7 @@ main()
 
     # create the result directory if it does not exist
     mkdir -p "$DATA_DIR"
-    mkdir -p "$TMP_DIR"
+    mkdir -p "$TMP_DIR/partial"
     mkdir -p "$OUT_DIR/cumperflattice"
     mkdir -p "$OUT_DIR/perflattice/slowdown"
     mkdir -p "$OUT_DIR/perflattice/speedup"
