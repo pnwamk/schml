@@ -171,8 +171,8 @@ gen_output()
     	   `"set xtics nomirror (\"1x\" 1,\"2x\" 2,\"3x\" 3,\"4x\" 4,\"5x\" 5, \"6x\" 6,\"7x\" 7, \"8x\" 8, \"9x\" 9, \"10x\" 10, \"15x\" 15, \"20x\" 20);"`
     	   `"set ytics nomirror 0,200;"`
 	       `"set arrow from 1,graph(0,0) to 1,graph(1,1) nohead lc rgb \"black\" lw 2;"`
-    	   `"plot '${logfile2}' using 1:2 with lines lw 2 dt 4 title '${c1t}' smooth cumulative,"`
-    	   `"'${logfile4}' using 1:2 with lines lw 2 dt 2 title '${c2t}' smooth cumulative"
+    	   `"plot '${logfile2}' using 1:2 with lines lw 2 title '${c1t}' smooth cumulative,"`
+    	   `"'${logfile4}' using 1:2 with lines lw 2 title '${c2t}' smooth cumulative"
 
     echo "\begin{tabular}{|l|l|l|}
 \hline
@@ -250,7 +250,7 @@ mean speedup               & ${mean2}x             & ${mean1}x            \\\ \h
     	   `"set output '${perf_lattice_lin_fig}';"`
 	       `"set key left font 'Verdana,20';"`
     	   `"set xrange [-5:105];"`
-           `"set xrange [0:];"`
+           `"set yrange [0:];"`
 	       `"set ytics add (\"1\" 1, \"\" ${g1}, \"\" ${g2});"`
     	   `"set title \"${printname}\";"`
 	       `"set ylabel \"Speedup over Gambit\";"`
@@ -263,8 +263,7 @@ mean speedup               & ${mean2}x             & ${mean1}x            \\\ \h
 	       `"${g2} lw 4 dt 4 lc rgb '#5e3c99'  title '${c2t} mean',"`
            `"1 lw 2 dt 4 lc rgb \"black\" title 'Gambit Scheme',"` 
            `"${static_speed_up} lw 2 dt 2 lc \"black\" title 'Static Grift';"
-     
-    # RETURN=$(awk -v g1="$g1" -v g2="$g2" "BEGIN {printf \"%.2f\n\", g2/g1}")
+
 }
 
 ##3182bd
@@ -392,8 +391,8 @@ run_experiment()
     run_benchmark $baseline_system $c1 $c2 "tak" "$tak_bc_arg" "$nsamples" "$nbins" ""
     g+=($RETURN)
     
-    # # Dynamizer uses too much memory
-    # #run_benchmark $baseline_system $c1 $c2 "ray" "" "$nsamples" "$nbins" ""
+    # Dynamizer uses too much memory
+    #run_benchmark $baseline_system $c1 $c2 "ray" "" "$nsamples" "$nbins" ""
 
     IFS=$'\n'
     max=$(echo "${g[*]}" | sort -nr | head -n1)

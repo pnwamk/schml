@@ -64,6 +64,10 @@
   (make-parameter #f))
 (define init-heap-kilobytes : (Parameterof Natural)
   (make-parameter 1024))
+(define init-types-hash-table-slots : (Parameterof Natural)
+  (make-parameter 50))
+(define types-hash-table-load-factor : (Parameterof Flonum)
+  (make-parameter 0.75))
 (define-type GC (U 'Boehm 'None))
 (define garbage-collector : (Parameterof GC)
   (make-parameter 'Boehm))
@@ -75,6 +79,4 @@
   (make-parameter '("-Wno-int-conversion" "-Wno-format" "-Wno-unused-value")))
 ;; where is the runtime to be used located
 (define runtime-path : (Parameterof (Option Path)) (make-parameter #f))
-
-
-
+(define hashcons-path : (Parameterof (Option Path)) (make-parameter #f))

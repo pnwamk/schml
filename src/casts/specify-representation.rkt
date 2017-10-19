@@ -38,9 +38,19 @@ but a static single assignment is implicitly maintained.
     prgm)
   (define unique (make-unique-counter next))
   (parameterize ([current-unique-counter unique])
-    (define boxed-bnd-code*  : (Boxof D0-Bnd-Code*) (box '()))
-    (define new-exp : D0-Expr
-      (sr-expr boxed-bnd-code* (hash) empty-index-map exp))
+    (define new-exp    : D0-Expr
+      (begin
+        (set-box! boxed-bnd-code* '())
+        (set-box! mk-fn-coercion-code-label? #f)
+        (set-box! mk-tuple-coercion-code-label? #f)
+        (set-box! comp-fn-coercion-code-label? #f)
+        (set-box! comp-tuple-coercion-code-label? #f)
+        (set-box! coerce-tuple-code-label? #f)
+        (set-box! coerce-tuple-in-place-code-label? #f)
+        (set-box! cast-tuple-code-label? #f)
+        (set-box! cast-tuple-in-place-code-label? #f)
+        (set-box! hashcons-types-code-label? #f)
+        (sr-expr (hash) empty-index-map exp)))
     (define init-type* : D0-Expr* (map allocate-bound-type type-bnd*))
     (define type-id*   : Uid*     (map (inst car Uid Any) type-bnd*))
     (define init-crcn* : D0-Expr* (map allocate-bound-coercion crcn-bnd*))
@@ -60,492 +70,601 @@ but a static single assignment is implicitly maintained.
 
 (define-type IndexMap (Uid Uid -> Nat))
 
-(: sr-expr ((Boxof D0-Bnd-Code*) Env IndexMap CoC6-Expr -> D0-Expr))
-(define (sr-expr new-code env cenv exp)
-  (: add-new-code! (D0-Bnd-Code -> Void))
-  (define (add-new-code! b)
-    (set-box! new-code (cons b (unbox new-code))))
-  
-  (: mk-fn-type-glb-code-label? (Boxof (Option (Code-Label Uid))))
-  (define mk-fn-type-glb-code-label? (box #f))
+(define boxed-bnd-code* : (Boxof D0-Bnd-Code*) (box '()))
 
-  (: mk-tuple-type-glb-code-label? (Boxof (Option (Code-Label Uid))))
-  (define mk-tuple-type-glb-code-label? (box #f))
+(: add-new-code! (D0-Bnd-Code -> Void))
+(define (add-new-code! b)
+  (set-box! boxed-bnd-code* (cons b (unbox boxed-bnd-code*))))
 
-  (: mk-fn-coercion-code-label? (Boxof (Option (Code-Label Uid))))
-  (define mk-fn-coercion-code-label? (box #f))
+(: mk-fn-coercion-code-label? (Boxof (Option (Code-Label Uid))))
+(define mk-fn-coercion-code-label? (box #f))
 
-  (: comp-fn-coercion-code-label? (Boxof (Option (Code-Label Uid))))
-  (define comp-fn-coercion-code-label? (box #f))
-  
-  (: coerce-tuple-code-label? (Boxof (Option (Code-Label Uid))))
-  (define coerce-tuple-code-label? (box #f))
+(: comp-fn-coercion-code-label? (Boxof (Option (Code-Label Uid))))
+(define comp-fn-coercion-code-label? (box #f))
 
-  (: coerce-tuple-in-place-code-label? (Boxof (Option (Code-Label Uid))))
-  (define coerce-tuple-in-place-code-label? (box #f))
+(: coerce-tuple-code-label? (Boxof (Option (Code-Label Uid))))
+(define coerce-tuple-code-label? (box #f))
 
-  (: cast-tuple-code-label? (Boxof (Option (Code-Label Uid))))
-  (define cast-tuple-code-label? (box #f))
+(: coerce-tuple-in-place-code-label? (Boxof (Option (Code-Label Uid))))
+(define coerce-tuple-in-place-code-label? (box #f))
 
-  (: cast-tuple-in-place-code-label? (Boxof (Option (Code-Label Uid))))
-  (define cast-tuple-in-place-code-label? (box #f))
+(: cast-tuple-code-label? (Boxof (Option (Code-Label Uid))))
+(define cast-tuple-code-label? (box #f))
 
-  (: mk-tuple-coercion-code-label? (Boxof (Option (Code-Label Uid))))
-  (define mk-tuple-coercion-code-label? (box #f))
+(: cast-tuple-in-place-code-label? (Boxof (Option (Code-Label Uid))))
+(define cast-tuple-in-place-code-label? (box #f))
 
-  (: comp-tuple-coercion-code-label? (Boxof (Option (Code-Label Uid))))
-  (define comp-tuple-coercion-code-label? (box #f))
-  
-  ;; The way that boxed immediate work currently bothers me.)    
-  ;; Since we have access to unboxed static ints should we just
-  ;; abandon the unboxed dyn integers another a mixture of static
-  ;; allocation and and constant lifting could be used to make all
-  (: sr-dyn-make ((CoC6-Expr -> D0-Expr) D0-Expr CoC6-Expr -> D0-Expr))
-  (define (sr-dyn-make sr-expr e1 e2)
-    (cond
-      [(Type? e2)
-       (match e2
-         [(Type (Int)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-INT-TAG)]
-         [(Type (Bool)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-BOOL-TAG)]
-         [(Type (Unit)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-UNIT-TAG)]
-         [(Type (Character)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-CHAR-TAG)]
-         [else (sr-alloc "dynamic_boxed" DYN-BOXED-TAG
-                         `(("value" . ,e1) ("type" . ,(sr-expr e2))))])]
-      [else
-       (begin$
-         (assign$ val e1)
-         (assign$ type (sr-expr e2))
-         (assign$ tag (op$ binary-and type TYPE-TAG-MASK))
-         (Switch
-             type
-           (let* ([shifted-imm (op$ %<< val DYN-IMDT-SHIFT)]
-                  [tag-shifted-imm
-                   (lambda ([tag : D0-Expr])
-                     : D0-Expr
-                     (op$ binary-or shifted-imm tag))])
-             `([(,data:TYPE-INT-RT-VALUE)  . ,(tag-shifted-imm DYN-INT-TAG)]
-               [(,data:TYPE-BOOL-RT-VALUE) . ,(tag-shifted-imm DYN-BOOL-TAG)]
-               [(,data:TYPE-UNIT-RT-VALUE) . ,(tag-shifted-imm DYN-UNIT-TAG)]
-               [(,data:TYPE-CHAR-RT-VALUE) . ,(tag-shifted-imm DYN-CHAR-TAG)]))
-           ;; Notice that float types fall into this case also
-           (sr-alloc "dynamic_boxed" DYN-BOXED-TAG `(("" . ,val) ("" . ,type)))))]))
-  
-  (: get-mk-tuple-type-glb! (Uid -> (Code-Label Uid)))
-  (define (get-mk-tuple-type-glb! mk-tglb)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! mk-tglb)
-      (define-track-next-uid!$ mk-tuple-type-glb)
-      (define mk-tuple-type-glb-label (Code-Label mk-tuple-type-glb))
-      (define mk-tglb-label (Code-Label mk-tglb))
-      (define mk-tuple-type-glb-c : D0-Code
-        (code$ (t1 t2 i count)
-          (If (op$ = i count)
-              (begin$
-                (assign$ t
-                  (op$ Alloc (sr-plus count TYPE-TUPLE-ELEMENTS-OFFSET)))
-                (sr-array-set! t TYPE-TUPLE-COUNT-INDEX count)
-                (sr-tag-value t TYPE-TUPLE-TAG))
-              (begin$
-                (assign$ t1a
-                  (sr-tagged-array-ref
-                   t1 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ t2a
-                  (sr-tagged-array-ref
-                   t2 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ t-glb (App-Code mk-tglb-label `(,t1a ,t2a)))
-                (assign$ tmp-t
-                  (App-Code
-                   mk-tuple-type-glb-label
-                   `(,t1 ,t2 ,(sr-plus (Quote 1) i) ,count)))
-                (sr-tagged-array-set!
-                 tmp-t
-                 TYPE-TUPLE-TAG
-                 (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)
-                 t-glb)
-                tmp-t))))
-      (add-new-code! (cons mk-tuple-type-glb mk-tuple-type-glb-c))
-      (set-box! mk-tuple-type-glb-code-label? mk-tuple-type-glb-label)
-      mk-tuple-type-glb-label)
-    (let ([cl? (unbox mk-tuple-type-glb-code-label?)])
-      (or cl? (make-code! mk-tglb))))
+(: mk-tuple-coercion-code-label? (Boxof (Option (Code-Label Uid))))
+(define mk-tuple-coercion-code-label? (box #f))
 
-  (: get-mk-fn-type-glb! (Uid -> (Code-Label Uid)))
-  (define (get-mk-fn-type-glb! mk-tglb)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! mk-tglb)
-      (define-track-next-uid!$ mk-fn-type-glb)
-      (define mk-fn-type-glb-label (Code-Label mk-fn-type-glb))
-      (define mk-tglb-label (Code-Label mk-tglb))
-      (define mk-fn-type-glb-c : D0-Code
-        (code$ (t1 t2 i arity)
-          (If (op$ = i arity)
-              (begin$
-                (assign$ t1r
-                  (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
-                (assign$ t2r
-                  (sr-tagged-array-ref t2 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
-                (assign$ rt (App-Code mk-tglb-label `(,t1r ,t2r)))
-                (assign$ t (op$ Alloc (sr-plus arity TYPE-FN-FMLS-OFFSET)))
-                (sr-array-set! t TYPE-FN-ARITY-INDEX arity)
-                (sr-array-set! t TYPE-FN-RETURN-INDEX rt)
-                (sr-tag-value t TYPE-FN-TAG))
-              (begin$
-                (assign$ t1a
-                  (sr-tagged-array-ref
-                   t1 TYPE-FN-TAG (sr-plus TYPE-FN-FMLS-OFFSET i)))
-                (assign$ t2a
-                  (sr-tagged-array-ref
-                   t2 TYPE-FN-TAG (sr-plus TYPE-FN-FMLS-OFFSET i)))
-                (assign$ t-glb (App-Code mk-tglb-label `(,t2a ,t1a)))
-                (assign$ t-tmp
-                  (App-Code
-                   mk-fn-type-glb-label `(,t1 ,t2 ,(sr-plus (Quote 1) i) ,arity)))
-                (sr-tagged-array-set!
-                 t-tmp TYPE-FN-TAG (sr-plus TYPE-FN-FMLS-OFFSET i) t-glb)
-                t-tmp))))
-      (add-new-code! (cons mk-fn-type-glb mk-fn-type-glb-c))
-      (set-box! mk-fn-type-glb-code-label? mk-fn-type-glb-label)
-      mk-fn-type-glb-label)
-    (let ([cl? (unbox mk-fn-type-glb-code-label?)])
-      (or cl? (make-code! mk-tglb))))
+(: comp-tuple-coercion-code-label? (Boxof (Option (Code-Label Uid))))
+(define comp-tuple-coercion-code-label? (box #f))
 
-  (: get-mk-fn-crcn! (Uid -> (Code-Label Uid)))
-  (define (get-mk-fn-crcn! mk-crcn)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! mk-crcn)
-      (define-track-next-uid!$ mk-fn-crcn)
-      (define mk-fn-crcn-label (Code-Label mk-fn-crcn))
-      (define mk-crcn-label (Code-Label mk-crcn))
-      (define mk-fn-crcn-c : D0-Code
-        (code$ (t1 t2 l i arity)
-          (If (op$ = i arity)
-              (begin$
-                (assign$ t1r
-                  (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
-                (assign$ t2r
-                  (sr-tagged-array-ref t2 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
-                (assign$ cr (App-Code mk-crcn-label `(,t1r ,t2r ,l)))
-                (assign$ crcn (op$ Alloc (sr-plus arity COERCION-FN-FMLS-OFFSET)))
-                (assign$ tagged-arity
-                  (op$ + (op$ %<< arity COERCION-SECOND-TAG-SHIFT)
-                       COERCION-FN-SECOND-TAG))
-                (sr-array-set! crcn COERCION-FN-ARITY-INDEX tagged-arity)
-                (sr-array-set! crcn COERCION-FN-RETURN-INDEX cr)
-                (sr-tag-value crcn COERCION-MEDIATING-TAG))
-              (begin$
-                (assign$ t1a
-                  (sr-tagged-array-ref
-                   t1 TYPE-FN-TAG (sr-plus TYPE-FN-FMLS-OFFSET i)))
-                (assign$ t2a
-                  (sr-tagged-array-ref
-                   t2 TYPE-FN-TAG (sr-plus TYPE-FN-FMLS-OFFSET i)))
-                (assign$ ca (App-Code mk-crcn-label `(,t2a ,t1a ,l)))
-                (assign$ tmp-crcn
-                  (App-Code
-                   mk-fn-crcn-label `(,t1 ,t2 ,l ,(sr-plus (Quote 1) i) ,arity)))
-                (sr-tagged-array-set!
-                 tmp-crcn
-                 COERCION-MEDIATING-TAG
-                 (sr-plus COERCION-FN-FMLS-OFFSET i)
-                 ca)
-                tmp-crcn))))
-      (add-new-code! (cons mk-fn-crcn mk-fn-crcn-c))
-      (set-box! mk-fn-coercion-code-label? mk-fn-crcn-label)
-      mk-fn-crcn-label)
-    (let ([cl? (unbox mk-fn-coercion-code-label?)])
-      (or cl? (make-code! mk-crcn))))
+(: hashcons-types-code-label? (Boxof (Option (Code-Label Uid))))
+(define hashcons-types-code-label? (box #f))
 
-  (: get-comp-fn-crcn! (Uid -> (Code-Label Uid)))
-  (define (get-comp-fn-crcn! comp-crcn)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! mk-crcn)
-      (define-track-next-uid!$ comp-fn)
-      (define comp-fn-label (Code-Label comp-fn))
-      (define comp-c (Code-Label comp-crcn))
-      (define comp-fn-c : D0-Code
-        (code$ (c1 c2 i arity id?1)
-          (If (op$ = i arity)
-              (begin$
-                (assign$ c1r
-                  (sr-tagged-array-ref
-                   c1 COERCION-MEDIATING-TAG COERCION-FN-RETURN-INDEX))
-                (assign$ c2r
-                  (sr-tagged-array-ref
-                   c2 COERCION-MEDIATING-TAG COERCION-FN-RETURN-INDEX))
-                (assign$ cr (App-Code comp-c `(,c1r ,c2r)))
-                (If (If id?1
-                        (sr-check-tag=?
-                         cr COERCION-TAG-MASK COERCION-IDENTITY-TAG)
-                        FALSE-IMDT)
-                    COERCION-IDENTITY-IMDT
-                    (begin$
-                      (assign$ crcn
-                        (op$ Alloc (sr-plus arity COERCION-FN-FMLS-OFFSET)))
-                      (assign$ tagged-arity
-                        (op$ + (op$ %<< arity COERCION-SECOND-TAG-SHIFT)
-                             COERCION-FN-SECOND-TAG))
-                      (sr-array-set! crcn COERCION-FN-ARITY-INDEX tagged-arity)
-                      (sr-array-set! crcn COERCION-FN-RETURN-INDEX cr)
-                      (sr-tag-value crcn COERCION-MEDIATING-TAG))))
-              (begin$
-                (assign$ c1a
-                  (sr-tagged-array-ref
-                   c1 COERCION-MEDIATING-TAG (sr-plus COERCION-FN-FMLS-OFFSET i)))
-                (assign$ c2a
-                  (sr-tagged-array-ref
-                   c2 COERCION-MEDIATING-TAG (sr-plus COERCION-FN-FMLS-OFFSET i)))
-                (assign$ ca (App-Code comp-c `(,c2a ,c1a)))
-                (assign$ id?2
-                  (If id?1
-                      (sr-check-tag=?
-                       ca COERCION-TAG-MASK COERCION-IDENTITY-TAG)
-                      FALSE-IMDT))
-                (assign$ tmp-crcn
-                  (App-Code
-                   comp-fn-label `(,c1 ,c2 ,(sr-plus (Quote 1) i) ,arity ,id?2)))
-                (If (sr-check-tag=?
-                     tmp-crcn COERCION-TAG-MASK COERCION-IDENTITY-TAG)
-                    COERCION-IDENTITY-IMDT
-                    (begin$
-                      (sr-tagged-array-set!
-                       tmp-crcn
-                       COERCION-MEDIATING-TAG
-                       (sr-plus COERCION-FN-FMLS-OFFSET i)
-                       ca)
-                      tmp-crcn))))))
-      (add-new-code! (cons comp-fn comp-fn-c))
-      (set-box! comp-fn-coercion-code-label? comp-fn-label)
-      comp-fn-label)
-    (let ([cl? (unbox comp-fn-coercion-code-label?)])
-      (or cl? (make-code! comp-crcn))))
+;; The way that boxed immediate work currently bothers me.)    
+;; Since we have access to unboxed static ints should we just
+;; abandon the unboxed dyn integers another a mixture of static
+;; allocation and and constant lifting could be used to make all
+(: sr-dyn-make ((CoC6-Expr -> D0-Expr) D0-Expr CoC6-Expr -> D0-Expr))
+(define (sr-dyn-make sr-expr e1 e2)
+  (cond
+    [(Type? e2)
+     (match e2
+       [(Type (Int)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-INT-TAG)]
+       [(Type (Bool)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-BOOL-TAG)]
+       [(Type (Unit)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-UNIT-TAG)]
+       [(Type (Character)) (op$ + (op$ %<< e1 DYN-IMDT-SHIFT) DYN-CHAR-TAG)]
+       [else (sr-alloc "dynamic_boxed" DYN-BOXED-TAG
+                       `(("value" . ,e1) ("type" . ,(sr-expr e2))))])]
+    [else
+     (begin$
+       (assign$ val e1)
+       (assign$ type (sr-expr e2))
+       (assign$ tag (sr-get-tag type TYPE-TAG-MASK))
+       (Switch
+           type
+         (let* ([shifted-imm (op$ %<< val DYN-IMDT-SHIFT)]
+                [tag-shifted-imm
+                 (lambda ([tag : D0-Expr])
+                   : D0-Expr
+                   (op$ binary-or shifted-imm tag))])
+           `([(,data:TYPE-INT-RT-VALUE)  . ,(tag-shifted-imm DYN-INT-TAG)]
+             [(,data:TYPE-BOOL-RT-VALUE) . ,(tag-shifted-imm DYN-BOOL-TAG)]
+             [(,data:TYPE-UNIT-RT-VALUE) . ,(tag-shifted-imm DYN-UNIT-TAG)]
+             [(,data:TYPE-CHAR-RT-VALUE) . ,(tag-shifted-imm DYN-CHAR-TAG)]))
+         ;; Notice that float types fall into this case also
+         (sr-alloc "dynamic_boxed" DYN-BOXED-TAG `(("" . ,val) ("" . ,type)))))]))
 
-  (: get-coerce-tuple! (Uid -> (Code-Label Uid)))
-  (define (get-coerce-tuple! cast)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! cast)
-      (define-track-next-uid!$ coerce-tuple)
-      (define coerce-tuple-label (Code-Label coerce-tuple))
-      (define cast-label (Code-Label cast))
-      (define coerce-tuple-c : D0-Code
-        (code$ (v c i count)
-          (If (op$ = i count)
-              (op$ Alloc count)
-              (begin$
-                (assign$ va (op$ Array-ref v i))
-                (assign$ ca
-                  (sr-tagged-array-ref
-                   c
-                   COERCION-MEDIATING-TAG
-                   (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ casted-val (App-Code cast-label `(,va ,ca ,ZERO-IMDT)))
-                (assign$ tmp-tpl
-                  (App-Code
-                   coerce-tuple-label `(,v ,c ,(sr-plus (Quote 1) i) ,count)))
-                (op$ Array-set! tmp-tpl i casted-val)
-                tmp-tpl))))
-      (add-new-code! (cons coerce-tuple coerce-tuple-c))
-      (set-box! coerce-tuple-code-label? coerce-tuple-label)
-      coerce-tuple-label)
-    (let ([cl? (unbox coerce-tuple-code-label?)])
-      (or cl? (make-code! cast))))
+(: tuple-type-glb ((Code-Label Uid) -> ((Var Uid) (Var Uid) -> D0-Expr)))
+(define ((tuple-type-glb tglb-label) t1 t2)
+  (define-track-next-uid!$ hrt)
+  (begin$
+    (assign$ t1-count
+      (sr-tagged-array-ref t1 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+    (assign$ t2-count
+      (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+    (assign$ smaller-count (If (op$ < t1-count t2-count) t1-count t2-count))
+    (assign$ bigger-count (If (op$ > t1-count t2-count) t1-count t2-count))
+    (assign$ rt (op$ Alloc (op$ + bigger-count TYPE-TUPLE-ELEMENTS-OFFSET)))
+    (assign$ iters (op$ + TYPE-TUPLE-ELEMENTS-OFFSET smaller-count))
+    (assign$ tagged-rt (sr-tag-value rt TYPE-TUPLE-TAG))
+    (repeat$ (i TYPE-TUPLE-ELEMENTS-OFFSET iters) (_ UNIT-IMDT)
+      (assign$ t1a (sr-tagged-array-ref t1 TYPE-TUPLE-TAG i))
+      (assign$ t2a (sr-tagged-array-ref t2 TYPE-TUPLE-TAG i))
+      (assign$ t-glb (app-code$ tglb-label t1a t2a))
+      (sr-array-set! rt i t-glb))
+    (cond$
+     [(op$ > t1-count t2-count)
+      (assign$ iters (op$ + t1-count TYPE-TUPLE-ELEMENTS-OFFSET))
+      (assign$ i-init (op$ + t2-count TYPE-TUPLE-ELEMENTS-OFFSET))
+      (repeat$ (i i-init iters) (_ UNIT-IMDT)
+        (assign$ t1a (sr-tagged-array-ref t1 TYPE-TUPLE-TAG i))
+        (sr-array-set! rt i t1a))]
+     [(op$ < t1-count t2-count)
+      (assign$ iters (op$ + t2-count TYPE-TUPLE-ELEMENTS-OFFSET))
+      (assign$ i-init (op$ + t1-count TYPE-TUPLE-ELEMENTS-OFFSET))
+      (repeat$ (i i-init iters) (_ UNIT-IMDT)
+        (assign$ t2a (sr-tagged-array-ref t1 TYPE-TUPLE-TAG i))
+        (sr-array-set! rt i t2a))]
+     [else UNIT-IMDT])
+    (sr-array-set! rt TYPE-TUPLE-COUNT-INDEX bigger-count)
+    (Assign hrt (app-code$ (get-hashcons-types!) tagged-rt))
+    (Var hrt)))
 
-  (: get-coerce-tuple-in-place! (Uid -> (Code-Label Uid)))
-  (define (get-coerce-tuple-in-place! cast)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! cast)
-      (define-track-next-uid!$ coerce-tuple-in-place)
-      (define cast-label (Code-Label cast))
-      (define coerce-tuple-in-place-label (Code-Label coerce-tuple-in-place))
-      (define coerce-tuple-in-place-c : D0-Code
-        (code$ (tpl-val tpl-crcn mono-addr)
-          (begin$
-            (assign$ tagged-count
+(: fn-type-glb ((Code-Label Uid) -> ((Var Uid) (Var Uid) -> D0-Expr)))
+(define ((fn-type-glb tglb-label) t1 t2)
+  (define-track-next-uid!$ hrt)
+  (begin$
+    (assign$ arity (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-ARITY-INDEX))
+    (assign$ rt (op$ Alloc (op$ + arity TYPE-FN-FMLS-OFFSET)))
+    (assign$ iters (op$ + TYPE-FN-FMLS-OFFSET arity))
+    (assign$ tagged-rt (sr-tag-value rt TYPE-FN-TAG))
+    (assign$ t1-rt (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
+    (assign$ t2-rt (sr-tagged-array-ref t2 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
+    (assign$ t-rt (app-code$ tglb-label t1-rt t2-rt))
+    (repeat$ (i TYPE-FN-FMLS-OFFSET iters) (_ UNIT-IMDT)
+      (assign$ t1a (sr-tagged-array-ref t1 TYPE-FN-TAG i))
+      (assign$ t2a (sr-tagged-array-ref t2 TYPE-FN-TAG i))
+      (assign$ t-glb (app-code$ tglb-label t1a t2a))
+      (sr-array-set! rt i t-glb))
+    (sr-array-set! rt TYPE-FN-ARITY-INDEX arity)
+    (sr-array-set! rt TYPE-FN-RETURN-INDEX t-rt)
+    (Assign hrt (app-code$ (get-hashcons-types!) tagged-rt))
+    (Var hrt)))
+
+(: get-mk-fn-crcn! (Uid -> (Code-Label Uid)))
+(define (get-mk-fn-crcn! mk-crcn)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! mk-crcn)
+    (define-track-next-uid!$ mk-fn-crcn)
+    (define mk-fn-crcn-label (Code-Label mk-fn-crcn))
+    (define mk-crcn-label (Code-Label mk-crcn))
+    (define mk-fn-crcn-c : D0-Code
+      (code$ (t1 t2 l)
+        (assign$ arity (sr-tagged-array-ref t2 TYPE-FN-TAG TYPE-FN-ARITY-INDEX))
+        (assign$ tagged-arity
+          (op$ + (op$ %<< arity COERCION-SECOND-TAG-SHIFT)
+               COERCION-FN-SECOND-TAG))
+        (assign$ t1r (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
+        (assign$ t2r (sr-tagged-array-ref t2 TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
+        (assign$ cr (app-code$ mk-crcn-label t1r t2r l))
+        (assign$ crcn (op$ Alloc (op$ + arity COERCION-FN-FMLS-OFFSET)))
+        (assign$ iters (op$ + TYPE-FN-FMLS-OFFSET arity))
+        (sr-array-set! crcn COERCION-FN-ARITY-INDEX tagged-arity)
+        (sr-array-set! crcn COERCION-FN-RETURN-INDEX cr)
+        (repeat$ (i TYPE-FN-FMLS-OFFSET iters) (_ UNIT-IMDT)
+          (assign$ t1a (sr-tagged-array-ref t1 TYPE-FN-TAG i))
+          (assign$ t2a (sr-tagged-array-ref t2 TYPE-FN-TAG i))
+          (assign$ val-crcn (app-code$ mk-crcn-label t2a t1a l))
+          (assign$ c-i (op$ + (op$ - i TYPE-FN-FMLS-OFFSET)
+                            COERCION-FN-FMLS-OFFSET))
+          (sr-array-set! crcn c-i val-crcn))
+        (sr-tag-value crcn COERCION-MEDIATING-TAG)))
+    (add-new-code! (cons mk-fn-crcn mk-fn-crcn-c))
+    (set-box! mk-fn-coercion-code-label? mk-fn-crcn-label)
+    mk-fn-crcn-label)
+  (let ([cl? (unbox mk-fn-coercion-code-label?)])
+    (or cl? (make-code! mk-crcn))))
+
+(: get-comp-fn-crcn! (Uid -> (Code-Label Uid)))
+(define (get-comp-fn-crcn! comp-crcn)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! comp-crcn)
+    (define-track-next-uid!$ comp-fn-crcn)
+    (define comp-fn-crcn-label (Code-Label comp-fn-crcn))
+    (define comp-crcn-label (Code-Label comp-crcn))
+    (define comp-fn-crcn-c : D0-Code
+      (code$ (crcn1 crcn2)
+        (assign$ tagged-arity
+          (sr-tagged-array-ref
+           crcn1 COERCION-MEDIATING-TAG COERCION-FN-ARITY-INDEX))
+        (assign$ arity (op$ %>> tagged-arity COERCION-SECOND-TAG-SHIFT))
+        (assign$ c1r
+          (sr-tagged-array-ref
+           crcn1 COERCION-MEDIATING-TAG COERCION-FN-RETURN-INDEX))
+        (assign$ c2r
+          (sr-tagged-array-ref
+           crcn2 COERCION-MEDIATING-TAG COERCION-FN-RETURN-INDEX))
+        (assign$ cr (app-code$ comp-crcn-label c1r c2r))
+        (assign$ new-crcn UNIT-IMDT)
+        (assign$ iters (op$ + COERCION-FN-FMLS-OFFSET arity))
+        (assign$ id? (sr-check-tag=? cr COERCION-TAG-MASK COERCION-IDENTITY-TAG))
+        (repeat$ (i COERCION-FN-FMLS-OFFSET iters) (_ UNIT-IMDT)
+          (assign$ c1a (sr-tagged-array-ref crcn1 COERCION-MEDIATING-TAG i))
+          (assign$ c2a (sr-tagged-array-ref crcn2 COERCION-MEDIATING-TAG i))
+          (assign$ composed-crcn (app-code$ comp-crcn-label c1a c2a))
+          (cond$
+           [id?
+            (assign$ tmp-id?
+              (sr-check-tag=?
+               composed-crcn COERCION-TAG-MASK COERCION-IDENTITY-TAG))
+            (cond$
+             [(op$ not tmp-id?)
+              (Assign (Var-id new-crcn) (op$ Alloc (op$ + arity COERCION-FN-FMLS-OFFSET)))
+              (sr-array-set! new-crcn COERCION-FN-ARITY-INDEX tagged-arity)
+              (sr-array-set! new-crcn COERCION-FN-RETURN-INDEX cr)
+              (repeat$ (j COERCION-FN-FMLS-OFFSET i) (_ UNIT-IMDT)
+                (sr-array-set! new-crcn j COERCION-IDENTITY-IMDT))
+              (sr-array-set! new-crcn i composed-crcn)
+              (Assign (Var-id id?) FALSE-IMDT)]
+             [else UNIT-IMDT])]
+           [else (sr-array-set! new-crcn i composed-crcn)]))
+        (cond$
+         [id? COERCION-IDENTITY-IMDT]
+         [else (sr-tag-value new-crcn COERCION-MEDIATING-TAG)])))
+    (add-new-code! (cons comp-fn-crcn comp-fn-crcn-c))
+    (set-box! comp-fn-coercion-code-label? comp-fn-crcn-label)
+    comp-fn-crcn-label)
+  (let ([cl? (unbox comp-fn-coercion-code-label?)])
+    (or cl? (make-code! comp-crcn))))
+
+(: get-coerce-tuple! (Uid -> (Code-Label Uid)))
+(define (get-coerce-tuple! coerce)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! coerce)
+    (define-track-next-uid!$ coerce-tuple)
+    (define coerce-tuple-label (Code-Label coerce-tuple))
+    (define coerce-label (Code-Label coerce))
+    (define coerce-tuple-c : D0-Code
+      (code$ (val crcn)
+        (assign$ tagged-count
+          (sr-tagged-array-ref
+           crcn COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
+        (assign$ count (op$ %>> tagged-count COERCION-SECOND-TAG-SHIFT))
+        (assign$ iters (op$ + COERCION-TUPLE-ELEMENTS-OFFSET count))
+        (assign$ new-val (op$ Alloc count))
+        (repeat$ (i COERCION-TUPLE-ELEMENTS-OFFSET iters) (_ UNIT-IMDT)
+          (assign$ val-i (op$ - i COERCION-TUPLE-ELEMENTS-OFFSET))
+          (assign$ vala (op$ Array-ref val val-i))
+          (assign$ crcna (sr-tagged-array-ref crcn COERCION-MEDIATING-TAG i))
+          (assign$ casted-vala (app-code$ coerce-label vala crcna ZERO-IMDT))
+          (op$ Array-set! new-val val-i casted-vala))
+        new-val))
+    (add-new-code! (cons coerce-tuple coerce-tuple-c))
+    (set-box! coerce-tuple-code-label? coerce-tuple-label)
+    coerce-tuple-label)
+  (let ([cl? (unbox coerce-tuple-code-label?)])
+    (or cl? (make-code! coerce))))
+
+(: get-coerce-tuple-in-place! (Uid -> (Code-Label Uid)))
+(define (get-coerce-tuple-in-place! cast)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! cast)
+    (define-track-next-uid!$ coerce-tuple-in-place)
+    (define cast-label (Code-Label cast))
+    (define coerce-tuple-in-place-label (Code-Label coerce-tuple-in-place))
+    (define coerce-tuple-in-place-c : D0-Code
+      (code$ (tpl-val tpl-crcn mono-addr)
+        (begin$
+          (assign$ tagged-count
+            (sr-tagged-array-ref
+             tpl-crcn COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
+          (assign$ count (op$ %>> tagged-count COERCION-SECOND-TAG-SHIFT))
+          (repeat$ (i ZERO-IMDT count) (_ UNIT-IMDT)
+            (assign$ val (op$ Array-ref tpl-val i))
+            (assign$ crcn
               (sr-tagged-array-ref
-               tpl-crcn COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
-            (assign$ count (op$ %>> tagged-count COERCION-SECOND-TAG-SHIFT))
-            (repeat$ (i ZERO-IMDT count) (_ UNIT-IMDT)
+               tpl-crcn
+               COERCION-MEDIATING-TAG
+               (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)))
+            (assign$ rtti1 (op$ Array-ref mono-addr MONO-RTTI-INDEX))
+            (assign$ new-val (app-code$ cast-label val crcn mono-addr))
+            (assign$ rtti2 (op$ Array-ref mono-addr MONO-RTTI-INDEX))
+            (If (op$ = rtti1 rtti2)
+                (op$ Array-set! tpl-val i new-val)
+                ZERO-IMDT))
+          tpl-val)))
+    (add-new-code! (cons coerce-tuple-in-place coerce-tuple-in-place-c))
+    (set-box! coerce-tuple-in-place-code-label? coerce-tuple-in-place-label)
+    coerce-tuple-in-place-label)
+  (let ([cl? (unbox coerce-tuple-in-place-code-label?)])
+    (or cl? (make-code! cast))))
+
+(: get-cast-tuple-in-place! (Uid -> (Code-Label Uid)))
+(define (get-cast-tuple-in-place! cast)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! cast)
+    (define-track-next-uid!$ cast-tuple-in-place)
+    (define cast-tuple-in-place-label (Code-Label cast-tuple-in-place))
+    (define cast-label (Code-Label cast))
+    (define cast-tuple-in-place-c : D0-Code
+      (code$ (tpl-val t1 t2 l mono-addr)
+        (begin$
+          (assign$ count
+            (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+          (repeat$ (i ZERO-IMDT count) (_ UNIT-IMDT)
+            (begin$
               (assign$ val (op$ Array-ref tpl-val i))
-              (assign$ crcn
+              (assign$ t1a
                 (sr-tagged-array-ref
-                 tpl-crcn
-                 COERCION-MEDIATING-TAG
-                 (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)))
+                 t1 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
+              (assign$ t2a
+                (sr-tagged-array-ref
+                 t2 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
               (assign$ rtti1 (op$ Array-ref mono-addr MONO-RTTI-INDEX))
-              (assign$ new-val (App-Code cast-label `(,val ,crcn ,mono-addr)))
+              (assign$ new-val (app-code$ cast-label val t1a t2a l mono-addr))
               (assign$ rtti2 (op$ Array-ref mono-addr MONO-RTTI-INDEX))
               (If (op$ = rtti1 rtti2)
                   (op$ Array-set! tpl-val i new-val)
-                  ZERO-IMDT))
-            tpl-val)))
-      (add-new-code! (cons coerce-tuple-in-place coerce-tuple-in-place-c))
-      (set-box! coerce-tuple-in-place-code-label? coerce-tuple-in-place-label)
-      coerce-tuple-in-place-label)
-    (let ([cl? (unbox coerce-tuple-in-place-code-label?)])
-      (or cl? (make-code! cast))))
+                  ZERO-IMDT)))
+          tpl-val)))
+    (add-new-code! (cons cast-tuple-in-place cast-tuple-in-place-c))
+    (set-box! cast-tuple-in-place-code-label? cast-tuple-in-place-label)
+    cast-tuple-in-place-label)
+  (let ([cl? (unbox cast-tuple-in-place-code-label?)])
+    (or cl? (make-code! cast))))
 
-  (: get-cast-tuple-in-place! (Uid -> (Code-Label Uid)))
-  (define (get-cast-tuple-in-place! cast)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! cast)
-      (define-track-next-uid!$ cast-tuple-in-place)
-      (define cast-tuple-in-place-label (Code-Label cast-tuple-in-place))
-      (define cast-label (Code-Label cast))
-      (define cast-tuple-in-place-c : D0-Code
-        (code$ (tpl-val t1 t2 l mono-addr)
+(: get-cast-tuple! (Uid -> (Code-Label Uid)))
+(define (get-cast-tuple! cast)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! cast)
+    (define-track-next-uid!$ cast-tuple)
+    (define cast-tuple-label (Code-Label cast-tuple))
+    (define cast-label (Code-Label cast))
+    (define cast-tuple-c : D0-Code
+      (code$ (val t1 t2 l)
+        (assign$ count
+          (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+        (assign$ new-val (op$ Alloc count))
+        (assign$ iters (op$ + TYPE-TUPLE-ELEMENTS-OFFSET count))
+        (repeat$ (i TYPE-TUPLE-ELEMENTS-OFFSET iters) (_ UNIT-IMDT)
+          (assign$ val-i (op$ - i TYPE-TUPLE-ELEMENTS-OFFSET))
+          (assign$ vala (op$ Array-ref val val-i))
+          (assign$ t1a (sr-tagged-array-ref t1 TYPE-TUPLE-TAG i))
+          (assign$ t2a (sr-tagged-array-ref t2 TYPE-TUPLE-TAG i))
+          (assign$ casted-vala (app-code$ cast-label vala t1a t2a l ZERO-IMDT))
+          (op$ Array-set! new-val val-i casted-vala))
+        new-val))
+    (add-new-code! (cons cast-tuple cast-tuple-c))
+    (set-box! cast-tuple-code-label? cast-tuple-label)
+    cast-tuple-label)
+  (let ([cl? (unbox cast-tuple-code-label?)])
+    (or cl? (make-code! cast))))
+
+(: get-mk-tuple-crcn! (Uid -> (Code-Label Uid)))
+(define (get-mk-tuple-crcn! mk-crcn)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! mk-crcn)
+    (define-track-next-uid!$ mk-tuple-crcn)
+    (define mk-tuple-crcn-label (Code-Label mk-tuple-crcn))
+    (define mk-crcn-label (Code-Label mk-crcn))
+    (define mk-tuple-crcn-c : D0-Code
+      ;; mk-tuple-crcn creates a coercion out of two tuple types, it also checks
+      ;; if the two types are identical, so that it can generate a simple
+      ;; identity coercion without allocating unnecessary tuple coercion of
+      ;; identities. It expects the length of the first tuple to be greater than
+      ;; or equal to the length of the second.
+      (code$ (t1 t2 l)
+        (assign$ t1-count
+          (sr-tagged-array-ref t1 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+        (assign$ t2-count
+          (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+        (assign$ crcn UNIT-IMDT)
+        (assign$ id? TRUE-IMDT)
+        (assign$ iters (op$ + TYPE-TUPLE-ELEMENTS-OFFSET t2-count))
+        (repeat$ (i TYPE-TUPLE-ELEMENTS-OFFSET iters) (_ UNIT-IMDT)
+          (assign$ t1a (sr-tagged-array-ref t1 TYPE-TUPLE-TAG i))
+          (assign$ t2a (sr-tagged-array-ref t2 TYPE-TUPLE-TAG i))
+          (assign$ val-crcn (app-code$ mk-crcn-label t1a t2a l))
+          (cond$
+           [id?
+            (assign$ tmp-id?
+              (sr-check-tag=?
+               val-crcn COERCION-TAG-MASK COERCION-IDENTITY-TAG))
+            (cond$
+             [(op$ not tmp-id?)
+              (assign$ tagged-count
+                (op$ + (op$ %<< t1-count COERCION-SECOND-TAG-SHIFT)
+                     COERCION-TUPLE-SECOND-TAG))
+              (assign$ c-i (op$ + (op$ - i TYPE-TUPLE-ELEMENTS-OFFSET)
+                                COERCION-TUPLE-ELEMENTS-OFFSET))
+              (Assign (Var-id crcn)
+                (op$ Alloc (op$ + t1-count COERCION-TUPLE-ELEMENTS-OFFSET)))
+              (sr-array-set! crcn COERCION-TUPLE-COUNT-INDEX tagged-count)
+              (repeat$ (j COERCION-TUPLE-ELEMENTS-OFFSET c-i) (_ UNIT-IMDT)
+                (sr-array-set! crcn j COERCION-IDENTITY-IMDT))
+              (sr-array-set! crcn c-i val-crcn)
+              (Assign (Var-id id?) FALSE-IMDT)]
+             [else UNIT-IMDT])]
+           [else
+            (assign$ c-i (op$ + (op$ - i TYPE-TUPLE-ELEMENTS-OFFSET)
+                              COERCION-TUPLE-ELEMENTS-OFFSET))
+            (sr-array-set! crcn c-i val-crcn)]))
+        (cond$
+         [id? COERCION-IDENTITY-IMDT]
+         [else
+          (assign$ iters (op$ + t1-count TYPE-TUPLE-ELEMENTS-OFFSET))
+          (assign$ i-init (op$ + t2-count TYPE-TUPLE-ELEMENTS-OFFSET))
+          (repeat$ (i i-init iters) (_ UNIT-IMDT)
+            (assign$ t1a (sr-tagged-array-ref t1 TYPE-TUPLE-TAG i))
+            (assign$ c-i (op$ + (op$ - i TYPE-TUPLE-ELEMENTS-OFFSET)
+                              COERCION-TUPLE-ELEMENTS-OFFSET))
+            (sr-array-set! crcn c-i COERCION-IDENTITY-IMDT))
+          (sr-tag-value crcn COERCION-MEDIATING-TAG)])))
+    (add-new-code! (cons mk-tuple-crcn mk-tuple-crcn-c))
+    (set-box! mk-tuple-coercion-code-label? mk-tuple-crcn-label)
+    mk-tuple-crcn-label)
+  (let ([cl? (unbox mk-tuple-coercion-code-label?)])
+    (or cl? (make-code! mk-crcn))))
+
+(: get-comp-tuple-crcn! (Uid -> (Code-Label Uid)))
+(define (get-comp-tuple-crcn! comp-crcn)
+  (: make-code! (Uid -> (Code-Label Uid)))
+  (define (make-code! comp-crcn)
+    (define-track-next-uid!$ comp-tuple-crcn)
+    (define comp-tuple-crcn-label (Code-Label comp-tuple-crcn))
+    (define comp-crcn-label (Code-Label comp-crcn))
+    (define comp-tuple-crcn-c : D0-Code
+      ;; comp-tuple-crcn expects to compose two tuple coercions of the same
+      ;; length. This might change later when I formalize our tuple semantics.
+      ;; It also make sure to return an identity coercion if the two coercions
+      ;; are identical.
+      (code$ (crcn1 crcn2)
+        (assign$ tagged-count
+          (sr-tagged-array-ref
+           crcn1 COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
+        (assign$ count (op$ %>> tagged-count COERCION-SECOND-TAG-SHIFT))
+        (assign$ new-crcn UNIT-IMDT)
+        (assign$ iters (op$ + COERCION-TUPLE-ELEMENTS-OFFSET count))
+        (assign$ id? TRUE-IMDT)
+        (repeat$ (i COERCION-TUPLE-ELEMENTS-OFFSET iters) (_ UNIT-IMDT)
+          (assign$ c1a (sr-tagged-array-ref crcn1 COERCION-MEDIATING-TAG i))
+          (assign$ c2a (sr-tagged-array-ref crcn2 COERCION-MEDIATING-TAG i))
+          (assign$ composed-crcn (app-code$ comp-crcn-label c1a c2a))
+          (cond$
+           [id?
+            (assign$ tmp-id?
+              (sr-check-tag=?
+               composed-crcn COERCION-TAG-MASK COERCION-IDENTITY-TAG))
+            (cond$
+             [(op$ not tmp-id?)
+              (Assign (Var-id new-crcn)
+                (op$ Alloc (op$ + count COERCION-TUPLE-ELEMENTS-OFFSET)))
+              (sr-array-set! new-crcn COERCION-TUPLE-COUNT-INDEX tagged-count)
+              (repeat$ (j COERCION-TUPLE-ELEMENTS-OFFSET i) (_ UNIT-IMDT)
+                (sr-array-set! new-crcn j COERCION-IDENTITY-IMDT))
+              (sr-array-set! new-crcn i composed-crcn)
+              (Assign (Var-id id?) FALSE-IMDT)]
+             [else UNIT-IMDT])]
+           [else (sr-array-set! new-crcn i composed-crcn)]))
+        (cond$
+         [id? COERCION-IDENTITY-IMDT]
+         [else (sr-tag-value new-crcn COERCION-MEDIATING-TAG)])))
+    (add-new-code! (cons comp-tuple-crcn comp-tuple-crcn-c))
+    (set-box! comp-tuple-coercion-code-label? comp-tuple-crcn-label)
+    comp-tuple-crcn-label)
+  (let ([cl? (unbox comp-tuple-coercion-code-label?)])
+    (or cl? (make-code! comp-crcn))))
+
+(: hash-type ((Var Uid) -> D0-Expr))
+(define (hash-type ty)
+  (define err-msg1
+    (Quote "specify-representation/hash-type: switch failure in access"))
+  (define err-msg2
+    (Quote "specify-representation/hash-type: switch failure in hashing"))
+  (: type-hash-access ((Var Uid) -> D0-Expr))
+  (define (type-hash-access ty)
+    (case$ ty
+      ;; The hash value for primitive types are their runtime values.
+      [(data:TYPE-DYN-RT-VALUE) TYPE-DYN-RT-VALUE]
+      [(data:TYPE-INT-RT-VALUE) TYPE-INT-RT-VALUE]
+      [(data:TYPE-BOOL-RT-VALUE) TYPE-BOOL-RT-VALUE]
+      [(data:TYPE-UNIT-RT-VALUE) TYPE-UNIT-RT-VALUE]
+      [(data:TYPE-FLOAT-RT-VALUE) TYPE-FLOAT-RT-VALUE]
+      [(data:TYPE-CHAR-RT-VALUE) TYPE-CHAR-RT-VALUE]
+      [else
+       (assign$ tag (sr-get-tag ty TYPE-TAG-MASK))
+       (case$ tag
+         [(data:TYPE-GREF-TAG)
+          (sr-tagged-array-ref ty TYPE-GREF-TAG TYPE-GREF-HASH-INDEX)]
+         [(data:TYPE-GVECT-TAG)
+          (sr-tagged-array-ref ty TYPE-GVECT-TAG TYPE-GVECT-HASH-INDEX)]
+         [(data:TYPE-MREF-TAG)
+          (sr-tagged-array-ref ty TYPE-MREF-TAG TYPE-MREF-HASH-INDEX)]
+         [(data:TYPE-MVECT-TAG)
+          (sr-tagged-array-ref ty TYPE-MVECT-TAG TYPE-MVECT-HASH-INDEX)]
+         [(data:TYPE-TUPLE-TAG)
+          (sr-tagged-array-ref ty TYPE-TUPLE-TAG TYPE-TUPLE-HASH-INDEX)]
+         [(data:TYPE-FN-TAG)
+          (sr-tagged-array-ref ty TYPE-FN-TAG TYPE-FN-HASH-INDEX)]
+         [else (op$ Print err-msg1) (op$ Exit (Quote 1)) UNDEF-IMDT])]))
+  (begin$
+    (assign$ tag (sr-get-tag ty TYPE-TAG-MASK))
+    (case$ tag
+      [(data:TYPE-GREF-TAG)
+       (assign$ arg-ty
+         (sr-tagged-array-ref ty TYPE-GREF-TAG TYPE-GREF-TYPE-INDEX))
+       (assign$ arg-type-hash (type-hash-access arg-ty))
+       (op$ + (op$ * (Quote 19) arg-type-hash) (Quote 1))]
+      [(data:TYPE-GVECT-TAG)
+       (assign$ arg-ty
+         (sr-tagged-array-ref ty TYPE-GVECT-TAG TYPE-GVECT-TYPE-INDEX))
+       (assign$ arg-type-hash (type-hash-access arg-ty))
+       (op$ + (op$ * (Quote 19) arg-type-hash) (Quote 2))]
+      [(data:TYPE-MREF-TAG)
+       (assign$ arg-ty
+         (sr-tagged-array-ref ty TYPE-MREF-TAG TYPE-MREF-TYPE-INDEX))
+       (assign$ arg-type-hash (type-hash-access arg-ty))
+       (op$ + (op$ * (Quote 19) arg-type-hash) (Quote 3))]
+      [(data:TYPE-MVECT-TAG)
+       (assign$ arg-ty
+         (sr-tagged-array-ref ty TYPE-MVECT-TAG TYPE-MVECT-TYPE-INDEX))
+       (assign$ arg-type-hash (type-hash-access arg-ty))
+       (op$ + (op$ * (Quote 19) arg-type-hash) (Quote 4))]
+      [(data:TYPE-FN-TAG)
+       (assign$ return-ty
+         (sr-tagged-array-ref ty TYPE-FN-TAG TYPE-FN-RETURN-INDEX))
+       (assign$ init-hash-code (type-hash-access return-ty))
+       (assign$ args-count
+         (sr-tagged-array-ref ty TYPE-FN-TAG TYPE-FN-ARITY-INDEX))
+       (assign$ iters-count (op$ + TYPE-FN-FMLS-OFFSET args-count))
+       (op$ +
+         (repeat$
+             (i TYPE-FN-FMLS-OFFSET iters-count)
+             (hash-code init-hash-code)
+           (assign$ arg-type (sr-tagged-array-ref ty TYPE-FN-TAG i))
+           (assign$ arg-type-hash (type-hash-access arg-type))
+           (op$ * (Quote 19) (op$ + hash-code arg-type-hash)))
+         (Quote 5))]
+      [(data:TYPE-TUPLE-TAG)
+       (assign$ elms-count
+         (sr-tagged-array-ref ty TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
+       (assign$ iters-count
+         (op$ + TYPE-TUPLE-ELEMENTS-OFFSET elms-count))
+       (op$ +
+         (repeat$
+             (i TYPE-TUPLE-ELEMENTS-OFFSET iters-count)
+             (hash-code (Quote 0))
+           (assign$ elem-type (sr-tagged-array-ref ty TYPE-TUPLE-TAG i))
+           (assign$ elem-type-hash (type-hash-access elem-type))
+           (op$ * (Quote 19) (op$ + hash-code elem-type-hash)))
+         (Quote 6))]
+      [else (op$ Print err-msg2) (op$ Exit (Quote 1)) UNDEF-IMDT])))
+
+(: get-hashcons-types! (-> (Code-Label Uid)))
+(define (get-hashcons-types!)
+  (: make-code! (-> (Code-Label Uid)))
+  (define (make-code!)
+    (define-track-next-uid!$ hashcons-types)
+    (define hashcons-types-label (Code-Label hashcons-types))
+    (define err-msg (Quote "specify-representation/hashcons-types: switch failure"))
+    (define hashcons-types-c : D0-Code
+      (code$ (ty)
+        (cond$
+         [(op$ <= ty TYPE-MAX-ATOMIC-RT-VALUE) ty]
+         [else
           (begin$
-            (assign$ count
-              (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
-            (repeat$ (i ZERO-IMDT count) (_ UNIT-IMDT)
+            (assign$ hcode (hash-type ty))
+            (assign$ hty (op$ Types-hashcons! ty hcode))
+            (cond$
+             [(op$ = ty hty)
               (begin$
-                (assign$ val (op$ Array-ref tpl-val i))
-                (assign$ t1a
-                  (sr-tagged-array-ref
-                   t1 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ t2a
-                  (sr-tagged-array-ref
-                   t2 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ rtti1 (op$ Array-ref mono-addr MONO-RTTI-INDEX))
-                (assign$ new-val
-                  (App-Code cast-label `(,val ,t1a ,t2a ,l ,mono-addr)))
-                (assign$ rtti2 (op$ Array-ref mono-addr MONO-RTTI-INDEX))
-                (If (op$ = rtti1 rtti2)
-                    (op$ Array-set! tpl-val i new-val)
-                    ZERO-IMDT)))
-            tpl-val)))
-      (add-new-code! (cons cast-tuple-in-place cast-tuple-in-place-c))
-      (set-box! cast-tuple-in-place-code-label? cast-tuple-in-place-label)
-      cast-tuple-in-place-label)
-    (let ([cl? (unbox cast-tuple-in-place-code-label?)])
-      (or cl? (make-code! cast))))
+                (assign$ index (op$ Types-gen-index!))
+                (assign$ tag (sr-get-tag ty TYPE-TAG-MASK))
+                (case$ tag
+                  [(data:TYPE-GREF-TAG)
+                   (sr-tagged-array-set!
+                    hty TYPE-GREF-TAG TYPE-GREF-INDEX-INDEX index)
+                   (sr-tagged-array-set!
+                    hty TYPE-GREF-TAG TYPE-GREF-HASH-INDEX hcode)]
+                  [(data:TYPE-GVECT-TAG)
+                   (sr-tagged-array-set!
+                    hty TYPE-GVECT-TAG TYPE-GVECT-INDEX-INDEX index)
+                   (sr-tagged-array-set!
+                    hty TYPE-GVECT-TAG TYPE-GVECT-HASH-INDEX hcode)]
+                  [(data:TYPE-MREF-TAG)
+                   (sr-tagged-array-set!
+                    hty TYPE-MREF-TAG TYPE-MREF-INDEX-INDEX index)
+                   (sr-tagged-array-set!
+                    hty TYPE-MREF-TAG TYPE-MREF-HASH-INDEX hcode)]
+                  [(data:TYPE-MVECT-TAG)
+                   (sr-tagged-array-set!
+                    hty TYPE-MVECT-TAG TYPE-MVECT-INDEX-INDEX index)
+                   (sr-tagged-array-set!
+                    hty TYPE-MVECT-TAG TYPE-MVECT-HASH-INDEX hcode)]
+                  [(data:TYPE-TUPLE-TAG)
+                   (sr-tagged-array-set!
+                    hty TYPE-TUPLE-TAG TYPE-TUPLE-INDEX-INDEX index)
+                   (sr-tagged-array-set!
+                    hty TYPE-TUPLE-TAG TYPE-TUPLE-HASH-INDEX hcode)]
+                  [(data:TYPE-FN-TAG)
+                   (sr-tagged-array-set!
+                    hty TYPE-FN-TAG TYPE-FN-INDEX-INDEX index)
+                   (sr-tagged-array-set!
+                    hty TYPE-FN-TAG TYPE-FN-HASH-INDEX hcode)]
+                  [else (op$ Print err-msg) (op$ Exit (Quote 1)) UNDEF-IMDT])
+                hty)]
+             [else hty]))])))
+    (add-new-code! (cons hashcons-types hashcons-types-c))
+    (set-box! hashcons-types-code-label? hashcons-types-label)
+    hashcons-types-label)
+  (let ([cl? (unbox hashcons-types-code-label?)])
+    (or cl? (make-code!))))
 
-  (: get-cast-tuple! (Uid -> (Code-Label Uid)))
-  (define (get-cast-tuple! cast)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! cast)
-      (define-track-next-uid!$ cast-tuple)
-      (define cast-tuple-label (Code-Label cast-tuple))
-      (define cast-label (Code-Label cast))
-      (define cast-tuple-c : D0-Code
-        (code$ (tpl-val t1 t2 l i count)
-          (If (op$ = i count)
-              (op$ Alloc count)
-              (begin$ (assign$ val (op$ Array-ref tpl-val i))
-                      (assign$ t1a
-                        (sr-tagged-array-ref
-                         t1 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                      (assign$ t2a
-                        (sr-tagged-array-ref
-                         t2 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                      (assign$ casted-val
-                        (App-Code cast-label `(,val ,t1a ,t2a ,l ,ZERO-IMDT)))
-                      (assign$ tmp-crcn
-                        (App-Code
-                         cast-tuple-label
-                         `(,tpl-val ,t1 ,t2 ,l ,(sr-plus (Quote 1) i) ,count)))
-                      (op$ Array-set! tmp-crcn i casted-val)
-                      tmp-crcn))))
-      (add-new-code! (cons cast-tuple cast-tuple-c))
-      (set-box! cast-tuple-code-label? cast-tuple-label)
-      cast-tuple-label)
-    (let ([cl? (unbox cast-tuple-code-label?)])
-      (or cl? (make-code! cast))))
-
-  (: get-mk-tuple-crcn! (Uid -> (Code-Label Uid)))
-  (define (get-mk-tuple-crcn! mk-crcn)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! mk-crcn)
-      (define-track-next-uid!$ mk-tuple-crcn)
-      (define mk-tuple-crcn-label (Code-Label mk-tuple-crcn))
-      (define mk-crcn-label (Code-Label mk-crcn))
-      (define mk-tuple-crcn-c : D0-Code
-        (code$ (t1 t2 l i count)
-          (If (op$ = i count)
-              (begin$
-                (assign$ crcn
-                  (op$ Alloc (sr-plus count COERCION-TUPLE-ELEMENTS-OFFSET)))
-                (assign$ tagged-count
-                  (op$ + (op$ %<< count COERCION-SECOND-TAG-SHIFT)
-                       COERCION-TUPLE-SECOND-TAG))
-                (sr-array-set! crcn COERCION-TUPLE-COUNT-INDEX tagged-count)
-                (sr-tag-value crcn COERCION-MEDIATING-TAG))
-              (begin$
-                (assign$ t1a
-                  (sr-tagged-array-ref
-                   t1 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ t2a
-                  (sr-tagged-array-ref
-                   t2 TYPE-TUPLE-TAG (sr-plus TYPE-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ val-crcn (App-Code mk-crcn-label `(,t1a ,t2a ,l)))
-                (assign$ tmp-crcn
-                  (App-Code
-                   mk-tuple-crcn-label `(,t1 ,t2 ,l ,(sr-plus (Quote 1) i) ,count)))
-                (sr-tagged-array-set!
-                 tmp-crcn
-                 COERCION-MEDIATING-TAG
-                 (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)
-                 val-crcn)
-                tmp-crcn))))
-      (add-new-code! (cons mk-tuple-crcn mk-tuple-crcn-c))
-      (set-box! mk-tuple-coercion-code-label? mk-tuple-crcn-label)
-      mk-tuple-crcn-label)
-    (let ([cl? (unbox mk-tuple-coercion-code-label?)])
-      (or cl? (make-code! mk-crcn))))
-
-  (: get-comp-tuple-crcn! (Uid -> (Code-Label Uid)))
-  (define (get-comp-tuple-crcn! comp-crcn)
-    (: make-code! (Uid -> (Code-Label Uid)))
-    (define (make-code! mk-crcn)
-      (define-track-next-uid!$ comp-tuple-crcn)
-      (define comp-tuple-crcn-label (Code-Label comp-tuple-crcn))
-      (define comp-crcn-label (Code-Label comp-crcn))
-      (define comp-tuple-crcn-c : D0-Code
-        (code$ (crcn1 crcn2 i count id?1)
-          (If (op$ = i count)
-              (begin$
-                (assign$ crcn
-                  (op$ Alloc (sr-plus count COERCION-TUPLE-ELEMENTS-OFFSET)))
-                (assign$ tagged-count
-                  (op$ + (op$ %<< count COERCION-SECOND-TAG-SHIFT)
-                       COERCION-TUPLE-SECOND-TAG))
-                (sr-array-set!
-                 crcn COERCION-TUPLE-COUNT-INDEX tagged-count)
-                (sr-tag-value crcn COERCION-MEDIATING-TAG))
-              (begin$
-                (assign$ c1a
-                  (sr-tagged-array-ref
-                   crcn1
-                   COERCION-MEDIATING-TAG
-                   (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ c2a
-                  (sr-tagged-array-ref
-                   crcn2
-                   COERCION-MEDIATING-TAG
-                   (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)))
-                (assign$ composed-crcn (App-Code comp-crcn-label `(,c1a ,c2a)))
-                (assign$ id?2
-                  (If id?1
-                      (sr-check-tag=?
-                       composed-crcn COERCION-TAG-MASK COERCION-IDENTITY-TAG)
-                      FALSE-IMDT))
-                (assign$ tmp-crcn
-                  (App-Code
-                   comp-tuple-crcn-label
-                   `(,crcn1 ,crcn2 ,(sr-plus (Quote 1) i) ,count ,id?2)))
-                (If (sr-check-tag=?
-                     tmp-crcn COERCION-TAG-MASK COERCION-IDENTITY-TAG)
-                    COERCION-IDENTITY-IMDT
-                    (begin$
-                      (sr-tagged-array-set!
-                       tmp-crcn
-                       COERCION-MEDIATING-TAG
-                       (sr-plus COERCION-TUPLE-ELEMENTS-OFFSET i)
-                       composed-crcn)
-                      tmp-crcn))))))
-      (add-new-code! (cons comp-tuple-crcn comp-tuple-crcn-c))
-      (set-box! comp-tuple-coercion-code-label? comp-tuple-crcn-label)
-      comp-tuple-crcn-label)
-    (let ([cl? (unbox comp-tuple-coercion-code-label?)])
-      (or cl? (make-code! comp-crcn))))
+(: sr-expr (Env IndexMap CoC6-Expr -> D0-Expr))
+(define (sr-expr env cenv exp)
 
   (: recur-curry-env (Env IndexMap -> (CoC6-Expr -> D0-Expr)))
   (define ((recur-curry-env env cenv) exp)
@@ -695,7 +814,7 @@ but a static single assignment is implicitly maintained.
          (begin$
            (assign$ tmp-crcn (sr-tagged-array-ref
                               e COERCION-MEDIATING-TAG COERCION-FN-ARITY-INDEX))
-           (assign$ crcn-tag (op$ binary-and tmp-crcn COERCION-TAG-MASK))
+           (assign$ crcn-tag (sr-get-tag tmp-crcn COERCION-TAG-MASK))
            (op$ = crcn-tag COERCION-FN-SECOND-TAG))]
         [(Fn-Coercion-Arity (app recur e))
          (begin$
@@ -722,32 +841,9 @@ but a static single assignment is implicitly maintained.
                                (cons "argument" e))
                              e*))))]
         [(Make-Fn-Coercion mk-crcn (app recur t1) (app recur t2) (app recur l))
-         (: invoke-mk-fn-crcn ((Code-Label Uid) (Var Uid) D0-Expr D0-Expr -> D0-Expr))
-         (define (invoke-mk-fn-crcn mk-fn t1 t2 l)
-           (App-Code
-            mk-fn
-            (list t1 t2 l ZERO-IMDT
-                  (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-ARITY-INDEX))))
-         (let ([mk-fn-crcn (get-mk-fn-crcn! mk-crcn)])
-           (if (Var? t1)
-               (invoke-mk-fn-crcn mk-fn-crcn t1 t2 l)
-               (begin$
-                 (assign$ fn-type1 t1)
-                 (invoke-mk-fn-crcn mk-fn-crcn fn-type1 t2 l))))]
-        [(Compose-Fn-Coercion compose (app recur c1) (app recur c2))
-         (: invoke-comp ((Code-Label Uid) (Var Uid) D0-Expr -> D0-Expr))
-         (define (invoke-comp comp-fn c1 c2)
-           (begin$
-             (assign$ tagged-arity
-               (sr-tagged-array-ref
-                c1 COERCION-MEDIATING-TAG COERCION-FN-ARITY-INDEX))
-             (assign$ arity (op$ %>> tagged-arity COERCION-SECOND-TAG-SHIFT))
-             (App-Code comp-fn (list c1 c2 ZERO-IMDT arity TRUE-IMDT))))
-         (let ([mk-fn-crcn (get-comp-fn-crcn! compose)])
-           (if (Var? c1)
-               (invoke-comp mk-fn-crcn c1 c2)
-               (begin$
-                 (assign$ fn-crcn1 c1) (invoke-comp mk-fn-crcn fn-crcn1 c2))))]
+         (app-code$ (get-mk-fn-crcn! mk-crcn) t1 t2 l)]
+        [(Compose-Fn-Coercion comp-crcn (app recur c1) (app recur c2))
+         (app-code$ (get-comp-fn-crcn! comp-crcn) c1 c2)]
         [(Id-Fn-Coercion (app recur a))
          (begin$
            (assign$ size a)
@@ -788,7 +884,7 @@ but a static single assignment is implicitly maintained.
          (begin$
            (assign$ tmp-crcn
              (sr-tagged-array-ref e COERCION-MEDIATING-TAG COERCION-REF-TAG-INDEX))
-           (assign$ crcn-tag (op$ binary-and tmp-crcn COERCION-TAG-MASK))
+           (assign$ crcn-tag (sr-get-tag tmp-crcn COERCION-TAG-MASK))
            (op$ = crcn-tag COERCION-REF-SECOND-TAG))]
         [(Ref-Coercion (app recur r) (app recur w))
          (begin$
@@ -840,7 +936,7 @@ but a static single assignment is implicitly maintained.
         [(Access (Dyn) 'value (app recur e) #f)
          (begin$
            (assign$ tmp e)
-           (assign$ tag (op$ binary-and tmp DYN-TAG-MASK))
+           (assign$ tag (sr-get-tag tmp DYN-TAG-MASK))
            (If (op$ = tag DYN-BOXED-TAG)
                (op$ Array-ref tmp DYN-VALUE-INDEX)
                (op$ %>> tmp DYN-IMDT-SHIFT)))]
@@ -848,7 +944,7 @@ but a static single assignment is implicitly maintained.
          (define err-msg (Quote "specify-representation/Dyn-type: switch failure"))
          (begin$
            (assign$ tmp e)
-           (assign$ tag (op$ binary-and tmp DYN-TAG-MASK))
+           (assign$ tag (sr-get-tag tmp DYN-TAG-MASK))
            (Switch tag
              `([(,data:DYN-BOXED-TAG) . ,(op$ Array-ref tmp DYN-TYPE-INDEX)]
                [(,data:DYN-INT-TAG) . ,TYPE-INT-RT-VALUE]
@@ -859,7 +955,7 @@ but a static single assignment is implicitly maintained.
         [(Access (Dyn) 'immediate-value (app recur e) #f)
          (op$ %>> e DYN-IMDT-SHIFT)]
         [(Access (Dyn) 'immediate-tag (app recur e) #f)
-         (op$ binary-and e DYN-TAG-MASK)]
+         (sr-get-tag e DYN-TAG-MASK)]
         [(Access (Dyn) 'box-value (app recur e) #f)
          (op$ Array-ref e DYN-VALUE-INDEX)]
         [(Access (Dyn) 'box-type (app recur e) #f)
@@ -874,7 +970,7 @@ but a static single assignment is implicitly maintained.
                 [(Unit) DYN-UNIT-TAG]
                 [(Character) DYN-CHAR-TAG]
                 [other  DYN-BOXED-TAG]))
-            (op$ = tag (op$ binary-and e DYN-TAG-MASK))]
+            (op$ = tag (sr-get-tag e DYN-TAG-MASK))]
            [other (error 'dyn-immediate-tag=? "expected type literal: ~a" t)])]
         ;; Observable Results Representation
         [(Blame (app recur e))
@@ -935,7 +1031,7 @@ but a static single assignment is implicitly maintained.
                      (op$ Exit (Quote -1))))
                (op$ Array-set! vect (op$ + ind UGVECT-OFFSET) e3)))]
         [(Guarded-Proxy-Huh (app recur e))
-         (op$ = (op$ binary-and e GREP-TAG-MASK) GPROXY-TAG)]
+         (op$ = (sr-get-tag e GREP-TAG-MASK) GPROXY-TAG)]
         [(Unguarded-Vect-length (app recur e))
          (op$ Array-ref e UGVECT-SIZE-INDEX)]
         [(Guarded-Proxy (app recur e) r)
@@ -1019,7 +1115,7 @@ but a static single assignment is implicitly maintained.
            (assign$ tmp-crcn
              (sr-tagged-array-ref
               e COERCION-MEDIATING-TAG COERCION-MVECT-TAG-INDEX))
-           (assign$ crcn-tag (op$ binary-and tmp-crcn COERCION-TAG-MASK))
+           (assign$ crcn-tag (sr-get-tag tmp-crcn COERCION-TAG-MASK))
            (op$ = crcn-tag COERCION-MVECT-SECOND-TAG))]
         [(MVect-Coercion-Type (app recur e))
          (sr-tagged-array-ref e COERCION-MEDIATING-TAG COERCION-MVECT-TYPE-INDEX)]
@@ -1034,7 +1130,7 @@ but a static single assignment is implicitly maintained.
          (begin$
            (assign$ tmp-crcn
              (sr-tagged-array-ref e COERCION-MEDIATING-TAG COERCION-MREF-TAG-INDEX))
-           (assign$ crcn-tag (op$ binary-and tmp-crcn COERCION-TAG-MASK))
+           (assign$ crcn-tag (sr-get-tag tmp-crcn COERCION-TAG-MASK))
            (op$ = crcn-tag COERCION-MREF-SECOND-TAG))]
         [(MRef-Coercion-Type (app recur e))
          (sr-tagged-array-ref e COERCION-MEDIATING-TAG COERCION-MREF-TYPE-INDEX)]
@@ -1046,31 +1142,25 @@ but a static single assignment is implicitly maintained.
            (sr-alloc "ref-coercion" COERCION-MEDIATING-TAG
                      `(("tag" . ,second-tag) ("type" . ,t))))]
         [(Make-GLB-Two-Fn-Types mk-glb (app recur t1) (app recur t2))
-         (: invoke-mk-fn-type-glb ((Code-Label Uid) (Var Uid) D0-Expr -> D0-Expr))
-         (define (invoke-mk-fn-type-glb mk-fn t1 t2)
-           (App-Code
-            mk-fn
-            (list t1 t2 ZERO-IMDT
-                  (sr-tagged-array-ref t1 TYPE-FN-TAG TYPE-FN-ARITY-INDEX))))
-         (let ([mk-fn-type-glb (get-mk-fn-type-glb! mk-glb)])
-           (if (Var? t1)
-               (invoke-mk-fn-type-glb mk-fn-type-glb t1 t2)
-               (begin$
-                 (assign$ fn-type1 t1)
-                 (invoke-mk-fn-type-glb mk-fn-type-glb fn-type1 t2))))]
+         (let ([mk-fn-type-glb (fn-type-glb (Code-Label mk-glb))])
+           (cond
+             [(and (Var? t1) (Var? t2)) (mk-fn-type-glb t1 t2)]
+             [(Var? t1) (begin$ (assign$ a-t2 t2) (mk-fn-type-glb t1 a-t2))]
+             [(Var? t2) (begin$ (assign$ a-t1 t1) (mk-fn-type-glb a-t1 t2))]
+             [else (begin$
+                     (assign$ a-t1 t1)
+                     (assign$ a-t2 t2)
+                     (mk-fn-type-glb a-t1 a-t2))]))]
         [(Make-GLB-Two-Tuple-Types mk-glb (app recur t1) (app recur t2))
-         (: invoke-mk-tuple-type-glb ((Code-Label Uid) (Var Uid) D0-Expr -> D0-Expr))
-         (define (invoke-mk-tuple-type-glb mk-tuple t1 t2)
-           (App-Code
-            mk-tuple
-            (list t1 t2 ZERO-IMDT
-                  (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))))
-         (let ([mk-tuple-type-glb (get-mk-tuple-type-glb! mk-glb)])
-           (if (Var? t1)
-               (invoke-mk-tuple-type-glb mk-tuple-type-glb t1 t2)
-               (begin$
-                 (assign$ tuple-type1 t1)
-                 (invoke-mk-tuple-type-glb mk-tuple-type-glb tuple-type1 t2))))]
+         (let ([mk-tuple-type-glb (tuple-type-glb (Code-Label mk-glb))])
+           (cond
+             [(and (Var? t1) (Var? t2)) (mk-tuple-type-glb t1 t2)]
+             [(Var? t1) (begin$ (assign$ a-t2 t2) (mk-tuple-type-glb t1 a-t2))]
+             [(Var? t2) (begin$ (assign$ a-t1 t1) (mk-tuple-type-glb a-t1 t2))]
+             [else (begin$
+                     (assign$ a-t1 t1)
+                     (assign$ a-t2 t2)
+                     (mk-tuple-type-glb a-t1 a-t2))]))]
         [(Type-GRef (app recur e)) (sr-type-gref e)]
         [(Type-GVect (app recur e)) (sr-type-gvect e)]
         [(Type-MRef (app recur e)) (sr-type-mref e)]
@@ -1094,7 +1184,7 @@ but a static single assignment is implicitly maintained.
            (assign$ tmp-crcn
              (sr-tagged-array-ref
               e COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
-           (assign$ crcn-tag (op$ binary-and tmp-crcn COERCION-TAG-MASK))
+           (assign$ crcn-tag (sr-get-tag tmp-crcn COERCION-TAG-MASK))
            (op$ = crcn-tag COERCION-TUPLE-SECOND-TAG))]
         [(Tuple-Coercion-Num (app recur e))
          (begin$
@@ -1109,90 +1199,20 @@ but a static single assignment is implicitly maintained.
         [(Type-Tuple-num (app recur e)) (type-tuple-count-access e)]
         [(Type-Tuple-item (app recur e) (app recur i))
          (type-tuple-elements-access e i)]
-        [(Coerce-Tuple uid (app recur v) (app recur c))
-         (: invoke-coerce-tuple ((Code-Label Uid) (Var Uid) D0-Expr -> D0-Expr))
-         (define (invoke-coerce-tuple coerce-tuple v c)
-           (begin$
-             (assign$ tagged-count
-               (sr-tagged-array-ref
-                c COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
-             (App-Code
-              coerce-tuple
-              (list v c ZERO-IMDT
-                    (op$ %>> tagged-count COERCION-SECOND-TAG-SHIFT)))))
-         (let ([coerce-tuple (get-coerce-tuple! uid)])
-           (if (Var? v)
-               (invoke-coerce-tuple coerce-tuple v c)
-               (begin$
-                 (assign$ tuple-val1 v)
-                 (invoke-coerce-tuple coerce-tuple tuple-val1 c))))]
-        [(Coerce-Tuple-In-Place uid (app recur v) (app recur c) (app recur mono-type))
-         (: invoke-coerce-tuple ((Code-Label Uid) (Var Uid) D0-Expr D0-Expr -> D0-Expr))
-         (define (invoke-coerce-tuple coerce-tuple v c a)
-           (App-Code
-            coerce-tuple
-            (list v c a)))
-         (let ([coerce-tuple (get-coerce-tuple-in-place! uid)])
-           (if (Var? v)
-               (invoke-coerce-tuple coerce-tuple v c mono-type)
-               (begin$
-                 (assign$ tuple-val1 v)
-                 (invoke-coerce-tuple coerce-tuple tuple-val1 c mono-type))))]
+        [(Coerce-Tuple coerce (app recur v) (app recur c))
+         (app-code$ (get-coerce-tuple! coerce) v c)]
+        [(Coerce-Tuple-In-Place coerce (app recur v) (app recur c) (app recur mono-type))
+         (app-code$ (get-coerce-tuple-in-place! coerce) v c mono-type)]
         [(Cast-Tuple-In-Place
-          uid (app recur v) (app recur t1) (app recur t2) (app recur lbl)
+          cast (app recur v) (app recur t1) (app recur t2) (app recur l)
           (app recur mono-address))
-         (: invoke-cast-tuple
-            ((Code-Label Uid) (Var Uid) D0-Expr D0-Expr D0-Expr D0-Expr
-                              -> D0-Expr))
-         (define (invoke-cast-tuple cast-tuple v t1 t2 lbl a)
-           (App-Code cast-tuple (list v t1 t2 lbl a)))
-         (let ([cast-tuple (get-cast-tuple-in-place! uid)])
-           (if (Var? v)
-               (invoke-cast-tuple cast-tuple v t1 t2 lbl mono-address)
-               (begin$
-                 (assign$ tuple-val1 v)
-                 (invoke-cast-tuple cast-tuple tuple-val1 t1 t2 lbl mono-address))))]
-        [(Cast-Tuple uid (app recur v) (app recur t1) (app recur t2) (app recur lbl))
-         (: invoke-cast-tuple ((Code-Label Uid) (Var Uid) D0-Expr D0-Expr D0-Expr -> D0-Expr))
-         (define (invoke-cast-tuple cast-tuple v t1 t2 lbl)
-           (begin$
-             (assign$ tagged-count
-               (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))
-             (App-Code cast-tuple (list v t1 t2 lbl ZERO-IMDT tagged-count))))
-         (let ([cast-tuple (get-cast-tuple! uid)])
-           (if (Var? v)
-               (invoke-cast-tuple cast-tuple v t1 t2 lbl)
-               (begin$
-                 (assign$ tuple-val1 v)
-                 (invoke-cast-tuple cast-tuple tuple-val1 t1 t2 lbl))))]
+         (app-code$ (get-cast-tuple-in-place! cast) v t1 t2 l mono-address)]
+        [(Cast-Tuple cast (app recur v) (app recur t1) (app recur t2) (app recur l))
+         (app-code$ (get-cast-tuple! cast) v t1 t2 l)]
         [(Make-Tuple-Coercion mk-crcn (app recur t1) (app recur t2) (app recur l))
-         (: invoke-mk-tuple-crcn ((Code-Label Uid) (Var Uid) D0-Expr D0-Expr -> D0-Expr))
-         (define (invoke-mk-tuple-crcn mk-tuple-crcn t1 t2 l)
-           (App-Code
-            mk-tuple-crcn
-            (list t1 t2 l ZERO-IMDT
-                  (sr-tagged-array-ref t2 TYPE-TUPLE-TAG TYPE-TUPLE-COUNT-INDEX))))
-         (let ([mk-tuple-crcn (get-mk-tuple-crcn! mk-crcn)])
-           (if (Var? t1)
-               (invoke-mk-tuple-crcn mk-tuple-crcn t1 t2 l)
-               (begin$
-                 (assign$ tuple-type1 t1)
-                 (invoke-mk-tuple-crcn mk-tuple-crcn tuple-type1 t2 l))))]
-        [(Compose-Tuple-Coercion compose (app recur c1) (app recur c2))
-         (: invoke-comp ((Code-Label Uid) (Var Uid) D0-Expr -> D0-Expr))
-         (define (invoke-comp comp-tuple c1 c2)
-           (begin$
-             (assign$ tagged-count
-               (sr-tagged-array-ref
-                c2 COERCION-MEDIATING-TAG COERCION-TUPLE-COUNT-INDEX))
-             (assign$ count (op$ %>> tagged-count COERCION-SECOND-TAG-SHIFT))
-             (App-Code comp-tuple (list c1 c2 ZERO-IMDT count TRUE-IMDT))))
-         (let ([mk-tuple-crcn (get-comp-tuple-crcn! compose)])
-           (if (Var? c1)
-               (invoke-comp mk-tuple-crcn c1 c2)
-               (begin$
-                 (assign$ tuple-crcn1 c1)
-                 (invoke-comp mk-tuple-crcn tuple-crcn1 c2))))]
+         (app-code$ (get-mk-tuple-crcn! mk-crcn) t1 t2 l)]
+        [(Compose-Tuple-Coercion comp-crcn (app recur c1) (app recur c2))
+         (app-code$ (get-comp-tuple-crcn! comp-crcn) c1 c2)]
         [(Mediating-Coercion-Huh (app recur e))
          (sr-check-tag=? e COERCION-TAG-MASK COERCION-MEDIATING-TAG)]
         [other (error 'specify-representation "unmatched ~a" other)]))
@@ -1239,7 +1259,7 @@ but a static single assignment is implicitly maintained.
     (error 'specify-representation "Empty objects can not be allocated"))
   (define-values (ass* var*) (get-assignments/vars slots))
   (define ind* (range 0 size))
-  (define alloc-id  (track-next-uid!$ name))
+  (define-track-next-uid!$ alloc-id)
   (define alloc-var (Var alloc-id))
   (define alloc-ass (Assign alloc-id (op$ Alloc (Quote size))))
   (define set* (map (sr-alloc-init alloc-var) ind* var*)) 
@@ -1248,6 +1268,40 @@ but a static single assignment is implicitly maintained.
       [(not tag?) alloc-var]
       [else (sr-tag-value alloc-var tag?)]))
   (Begin (append ass* (cons alloc-ass set*)) tag-return))
+
+(: sr-hashcons-types (String (Option D0-Expr) (Listof (Pair String D0-Expr)) -> D0-Expr))
+(define (sr-hashcons-types name tag? slots)
+  (: sr-alloc-init ((Var Uid) -> (Nonnegative-Fixnum D0-Expr -> D0-Expr)))
+  (define ((sr-alloc-init mem) offset value)
+    (op$ Array-set! mem (Quote offset) value))
+  (: get-assignments/vars ((Listof (Pair String D0-Expr)) -> (Values D0-Expr* (Listof (Var Uid)))))
+  (define (get-assignments/vars b*)
+    (cond
+      [(null? b*) (values '() '())]
+      [else
+       (match-define (cons (cons n e) d) b*)
+       (define-values (a* v*) (get-assignments/vars d))
+       (cond
+         [(Var? e) (values a* (cons e v*))]
+         [else
+          (define u (track-next-uid!$ n))
+          (values (cons (Assign u e) a*) (cons (Var u) v*))])]))
+  (define size (length slots))
+  (when (= size 0)
+    (error 'specify-representation "Empty objects can not be allocated"))
+  (define-values (ass* var*) (get-assignments/vars slots))
+  (define allocation-size (+ 2 size))
+  (define ind* (range 2 allocation-size))
+  (define-track-next-uid!$ alloc-id)
+  (define alloc-var (Var alloc-id))
+  (define alloc-ass (Assign alloc-id (op$ Alloc (Quote allocation-size))))
+  (define init* (map (sr-alloc-init alloc-var) ind* var*))
+  (define tagged-ptr : D0-Expr
+    (cond
+      [(not tag?) alloc-var]
+      [else (sr-tag-value alloc-var tag?)]))
+  (Begin `(,alloc-ass ,@ass* ,@init*)
+         (app-code$ (get-hashcons-types!) tagged-ptr)))
 
 (: sr-prim-type (Immediate-Type -> D0-Expr))
 (define (sr-prim-type t)
@@ -1261,10 +1315,11 @@ but a static single assignment is implicitly maintained.
     [(Static-Id u) (Var u)]
     [other (error 'specify-representation/primitive-type "unmatched ~a" other)]))
 
-;; define-memory-layout-helpers generates constants and functions for creating,
-;; accessing, and checking for equality for the specified heap-allocated object.
+;; define-types-memory-layout-helpers generates constants and functions for
+;; creating, accessing, and checking for equality for the specified
+;; heap-allocated object.
 ;; For example:
-;; (define-memory-layout-helpers "type" "tuple" #b101
+;; (define-types-memory-layout-helpers "type" "tuple" #b101
 ;;                               ("count" single) ("elements" many))
 ;; generates the following for a type called tuple:
 ;; (define data:TYPE-TUPLE-COUNT-INDEX 0)
@@ -1288,7 +1343,7 @@ but a static single assignment is implicitly maintained.
 ;;                           (Quote (+ data:TYPE-TUPLE-ELEMENTS-OFFSET k))]
 ;;                         [otherwise
 ;;                           (Op '+ (list TYPE-TUPLE-ELEMENTS-OFFSET tmp7))])))
-(define-syntax (define-memory-layout-helpers stx)
+(define-syntax (define-types-memory-layout-helpers stx)
   (syntax-parse stx
     #:datum-literals (single many)
     [(_ namespace:str name:str tag:exact-integer
@@ -1323,6 +1378,10 @@ but a static single assignment is implicitly maintained.
        (format-id stx "~a-~a?" namespace-string name-string))
      (define/with-syntax namespace-mask-def
        (format-id stx "~a-TAG-MASK" namespace-string-caps))
+     (define/with-syntax index-def
+       (format-id stx "~a-INDEX-INDEX" qualified-upcase-name))
+     (define/with-syntax hash-def
+       (format-id stx "~a-HASH-INDEX" qualified-upcase-name))
      (define/with-syntax tag-def (format-id stx "~a-TAG" qualified-upcase-name))
      (define/with-syntax (sindex/offset-def* ...)
        (if many-field-dtm (append index-def* (list offset-def)) index-def*))
@@ -1331,9 +1390,11 @@ but a static single assignment is implicitly maintained.
            (append index-data-def* (list offset-data-def))
            index-data-def*))
      (define/with-syntax tag-data-def (gen-data-id #'tag-def))
+     (define/with-syntax index-data-def (gen-data-id #'index-def))
+     (define/with-syntax hash-data-def (gen-data-id #'hash-def))
      (define/with-syntax (sindex/offset-val* ...)
-       (let ([n (length field-string*)])
-         (datum->syntax stx (range (if many-field-dtm (add1 n) n)))))
+       (let ([n (+ 2 (length field-string*))])
+         (datum->syntax stx (range 2 (if many-field-dtm (add1 n) n)))))
      (define/with-syntax (alloc-arg* ...) temp*)
      (define/with-syntax (alloc-val* ...) field-val*)
      (define/with-syntax func-alloc
@@ -1344,14 +1405,14 @@ but a static single assignment is implicitly maintained.
                         [alloc-arg* : D0-Expr] ...
                         [last-alloc-arg : (Listof D0-Expr)])
                  : D0-Expr
-                 (sr-alloc
+                 (sr-hashcons-types
                   #,name-string tag-def
                   `((field*
                      . ,alloc-val*) ... .
                     ,(map (lambda ([arg : D0-Expr]) (cons many-field arg))
                           last-alloc-arg)))))
            #`(define (func-alloc-name [alloc-arg* : D0-Expr] ...) : D0-Expr
-               (sr-alloc #,name-string tag-def `((field* . ,alloc-val*) ...)))))
+               (sr-hashcons-types #,name-string tag-def `((field* . ,alloc-val*) ...)))))
      (define/with-syntax equal-arg (generate-temporary))
      (define (gen-func-access*)
        (define (gen-access-func-name field-string)
@@ -1377,6 +1438,10 @@ but a static single assignment is implicitly maintained.
      #`(begin
          (define tag-data-def tag)
          (define tag-def (Quote tag-data-def))
+         (define index-data-def 0)
+         (define index-def (Quote index-data-def))
+         (define hash-data-def 1)
+         (define hash-def (Quote hash-data-def))
          (define sindex/offset-data-def* sindex/offset-val*) ...
          (define sindex/offset-def* (Quote sindex/offset-data-def*)) ...
          func-alloc
@@ -1384,13 +1449,13 @@ but a static single assignment is implicitly maintained.
            (sr-check-tag=? equal-arg namespace-mask-def tag-def))
          #,@(gen-func-access*))]))
 
-(define-memory-layout-helpers "type" "gref" #b001 ("type" single))
-(define-memory-layout-helpers "type" "gvect" #b010 ("type" single))
-(define-memory-layout-helpers "type" "mref" #b011 ("type" single))
-(define-memory-layout-helpers "type" "mvect" #b100 ("type" single))
-(define-memory-layout-helpers "type" "fn" #b000
+(define-types-memory-layout-helpers "type" "gref" #b001 ("type" single))
+(define-types-memory-layout-helpers "type" "gvect" #b010 ("type" single))
+(define-types-memory-layout-helpers "type" "mref" #b011 ("type" single))
+(define-types-memory-layout-helpers "type" "mvect" #b100 ("type" single))
+(define-types-memory-layout-helpers "type" "fn" #b000
   ("arity" single) ("return" single) ("fmls" many))
-(define-memory-layout-helpers "type" "tuple" #b101
+(define-types-memory-layout-helpers "type" "tuple" #b101
   ("count" single) ("elements" many))
 
 (: allocate-bound-type (CoC6-Bnd-Type -> D0-Expr))
@@ -1695,7 +1760,7 @@ but a static single assignment is implicitly maintained.
   (sr-array-ref (unmask-rest e tm) i))
 
 (: check-tag? : D0-Expr D0-Expr -> D0-Expr)
-(define (check-tag? e m) (op$ not (op$ = ZERO-IMDT (op$ binary-and e m))))
+(define (check-tag? e m) (op$ not (op$ = ZERO-IMDT (sr-get-tag e m))))
 
 (: sr-tag-value (D0-Expr D0-Expr -> D0-Expr))
 (define (sr-tag-value e t)
@@ -1704,7 +1769,10 @@ but a static single assignment is implicitly maintained.
     [tag (Op 'binary-or `(,e ,tag))]))
 
 (: sr-check-tag=? (D0-Expr D0-Expr D0-Expr -> D0-Expr))
-(define (sr-check-tag=? e mask tag) (op$ = (op$ binary-and e mask) tag))
+(define (sr-check-tag=? e mask tag) (op$ = (sr-get-tag e mask) tag))
 
 (: sr-plus (D0-Expr D0-Expr -> D0-Expr))
 (define (sr-plus f s) (op$ + f s))
+
+(: sr-get-tag (D0-Expr D0-Expr -> D0-Expr))
+(define (sr-get-tag e mask) (op$ binary-and e mask))

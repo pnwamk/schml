@@ -46,6 +46,9 @@ TODO write unit tests
 (define cast-runtime-code-bindings : (Parameterof (Option CoC3-Bnd-Code*))
   (make-parameter #f))
 
+(define types-greatest-lower-bound-code-label? : (Parameterof (Option (Code-Label Uid)))
+  (make-parameter #f))
+
 
 (: apply-code (->* (Uid) #:rest CoC3-Expr CoC3-Expr))
 (define (apply-code u . a*)
@@ -146,16 +149,16 @@ TODO write unit tests
 (define-type MVec-Ref-Type (CoC3-Expr CoC3-Expr CoC3-Expr -> CoC3-Expr))
 (define-type MVec-Set-Type (CoC3-Expr CoC3-Expr CoC3-Expr CoC3-Expr -> CoC3-Expr))
 
-
-
-(define-type Types-Greatest-Lower-Bound-Type (CoC3-Expr CoC3-Expr -> CoC3-Expr))
-(: make-compile-types-greatest-lower-bound : -> Types-Greatest-Lower-Bound-Type)
+(: make-compile-types-greatest-lower-bound : -> (Code-Label Uid))
 (define (make-compile-types-greatest-lower-bound)
-  (define tglb-uid : Uid (next-uid! "types-greatest-lower-bound"))
-  (: interp-tglb Greatest-Lower-Bound-Type)
-  (define (interp-tglb t1 t2)
-    (apply-code tglb-uid t1 t2))
-  (define tglb-code : CoC3-Code
+  (define (make-code!)
+    (define-track-next-uid!$ types-greatest-lower-bound)
+    (define types-greatest-lower-bound-label
+      (Code-Label types-greatest-lower-bound))
+    (: interp-tglb (CoC3-Expr CoC3-Expr -> CoC3-Expr))
+    (define (interp-tglb t1 t2)
+      (apply-code types-greatest-lower-bound t1 t2))
+    (define tglb-code : CoC3-Code
     (code$ (t1 t2)
       (cond$
        [(op=? t1 t2) t1]
@@ -163,7 +166,7 @@ TODO write unit tests
        [(type-dyn?$  t2) t1]
        [(and$ (type-fn?$ t1) (type-fn?$ t2)
               (op=? (type-fn-arity$ t1) (type-fn-arity$ t2)))
-        (Make-GLB-Two-Fn-Types tglb-uid t1 t2)]
+        (Make-GLB-Two-Fn-Types types-greatest-lower-bound t1 t2)]
        [(and$ (type-pbox?$ t1) (type-pbox?$ t2))
         (Type-GRef (interp-tglb (type-pbox-of$ t1) (type-pbox-of$ t2)))]
        [(and$ (type-pvec?$ t1) (type-pvec?$ t2))
@@ -174,55 +177,13 @@ TODO write unit tests
         (Type-MVect (interp-tglb (type-mvec-of$ t1) (type-mvec-of$ t2)))]
        [(and$ (type-tup?$ t1) (type-tup?$ t2)
               (op<=? (type-tup-arity$ t2) (type-tup-arity$ t1)))
-        (Make-GLB-Two-Tuple-Types tglb-uid t1 t2)]
+        (Make-GLB-Two-Tuple-Types types-greatest-lower-bound t1 t2)]
        [else (Error (Quote "inconsistent types"))])))
-  (: tglb : Schml-Type Schml-Type -> (Option Schml-Type))
-  (define (tglb t1 t2)
-    (: tglb* : Schml-Type* Schml-Type* -> (Option Schml-Type*))
-    (define (tglb* l1 l2)
-      (match* (l1 l2) 
-        [(_ '()) '()]
-        [((cons a1 d1)(cons a2 d2))
-         (define a? (tglb a1 a2))
-         (define d? (tglb* d1 d2))
-         ;; monadic use of and
-         (and a? d? (cons a? d?))]))
-    (match* (t1 t2)
-      [(t t) t]
-      [((Dyn) t2) t2]
-      [(t1 (Dyn)) t1]
-      [((Fn n t1* t1) (Fn n t2* t2))
-       (define r? (tglb t1 t2))
-       (define a? (tglb* t1* t2*))
-       (and r? a? (Fn n a? r?))]
-      [((GRef t1) (GRef t2))
-       (define t? (tglb t1 t2))
-       (and t? (GRef t?))]
-      [((GVect t1) (GVect t2))
-       (define t? (tglb t1 t2))
-       (and t? (GVect t?))]
-      [((MRef t1) (MRef t2))
-       (define t? (tglb t1 t2))
-       (and t? (MRef t?))]
-      [((MVect t1) (MVect t2))
-       (define t? (tglb t1 t2))
-       (and t? (MVect t?))]
-      [((STuple n t1*) (STuple m t2*)) #:when (< m n)
-       (define t*? (tglb* t1* t2*))
-       (and t*? (STuple m t*?))]
-      [(_ _) #f]))
-  (: compile-tglb Types-Greatest-Lower-Bound-Type)
-  (define (compile-tglb t1 t2)
-    (match* (t1 t2)
-      [(t t) t]
-      [((Type t1-t) (Type t2-t))
-       (define tglb? (tglb t1-t t2-t))
-       (cond
-         [tglb? (Type tglb?)]
-         [else (interp-tglb t1 t2)])]
-      [(t1 t2) (interp-tglb t1 t2)]))
-  (add-cast-runtime-binding! tglb-uid tglb-code)
-  compile-tglb)
+    (add-cast-runtime-binding! types-greatest-lower-bound tglb-code)
+    (types-greatest-lower-bound-code-label? types-greatest-lower-bound-label)
+    types-greatest-lower-bound-label)
+  (let ([cl? (types-greatest-lower-bound-code-label?)])
+    (or cl? (make-code!))))
 
 ;; This next section of code are the procedures that build all
 ;; of the runtime code for hyper coercions based casting.
@@ -235,7 +196,6 @@ TODO write unit tests
        CoC3-Expr))
 (define-type Cast-Type (->* (CoC3-Expr CoC3-Expr CoC3-Expr CoC3-Expr) (CoC3-Expr) CoC3-Expr))
 (define-type Cast-Tuple-Type (CoC3-Expr CoC3-Expr CoC3-Expr CoC3-Expr CoC3-Expr -> CoC3-Expr))
-(define-type Greatest-Lower-Bound-Type (CoC3-Expr CoC3-Expr -> CoC3-Expr))
 (define-type Copy-Mref-Type (CoC3-Expr -> CoC3-Expr))
 (define-type Make-Coercion-Type
   (CoC3-Expr CoC3-Expr CoC3-Expr -> CoC3-Expr))
@@ -674,7 +634,7 @@ TODO write unit tests
   (: code-gen-mbox-ref MBox-Ref-Type)
   (define (code-gen-mbox-ref mref t2)
     (let*$ ([mref mref])
-      (cast (Mbox-val-ref mref) (Mbox-rtti-ref mref) t2 (Quote "Monotonic"))))
+      (cast (Mbox-val-ref mref) (Mbox-rtti-ref mref) t2 (Quote "Monotonic ref read error"))))
   
   (: bnd-t1-if-not-type : CoC3-Expr (CoC3-Expr -> CoC3-Expr) -> CoC3-Expr)
   (define (bnd-t1-if-not-type t1 type->expr)
@@ -699,7 +659,7 @@ TODO write unit tests
                          (Mbox-val-set! mref ctv)
                          ctv))]
                     [else val])]
-               [ccv (cast cv t1 t2 (Quote "Monotonic") mref)])
+               [ccv (cast cv t1 t2 (Quote "Monotonic ref write error") mref)])
          ;; Unclear: I don't understand why there is a conditional
          ;; write here. Perhaps it is due to the side channel mref in
          ;; cast above.  I think the only use of this is in the
@@ -717,7 +677,7 @@ TODO write unit tests
   (: code-gen-mvec-ref MVec-Ref-Type)
   (define (code-gen-mvec-ref mvec i t2)
     (let*$ ([v mvec])
-      (cast (Mvector-val-ref v i) (Mvector-rtti-ref mvec) t2 (Quote "Monotonic"))))
+      (cast (Mvector-val-ref v i) (Mvector-rtti-ref mvec) t2 (Quote "Monotonic vect read error"))))
   
   (: code-gen-mvec-set! MVec-Set-Type)
   (define (code-gen-mvec-set! mvec i val t1)
@@ -734,7 +694,7 @@ TODO write unit tests
                         (Mvector-val-set! mvec i cvi)
                         cvi)]
                      [else val])]
-               [ccvi (cast cvi t1 t2 (Quote "Monotonic") mvec)])
+               [ccvi (cast cvi t1 t2 (Quote "Monotonic vect write error") mvec)])
          (If (op=? t2 (Mvector-rtti-ref mvec))
              (Mvector-val-set! mvec i ccvi)
              (Quote '()))))))
@@ -1422,7 +1382,7 @@ TODO write unit tests
       (match t2
         [(Type (Dyn))
          (error 'grift/make-code-gen-project "Called with t2 = Dyn")]
-        [(Type (or (Int) (Character) (Unit) (Bool)))
+        [(Type (or (Float) (Int) (Character) (Unit) (Bool)))
          (If (dyn-immediate-tag=?$ v t2)
              (dyn-immediate-value$ v)
              (interp-project v t2 l mt))]
@@ -1718,7 +1678,7 @@ TODO write unit tests
 
 (: make-compile-mbox-cast
    (->* (#:interp-cast Cast-Type
-         #:greatest-lower-bound Greatest-Lower-Bound-Type)
+         #:greatest-lower-bound (Code-Label Uid))
         Monotonic-Cast-Type))
 (define (make-compile-mbox-cast
          #:interp-cast interp-cast
@@ -1741,7 +1701,7 @@ TODO write unit tests
        [(Type-Dyn-Huh t2) v]
        [else
         (let*$ ([t1 (Mbox-rtti-ref v)]
-                [t3 (greatest-lower-bound t1 t2)])
+                [t3 (app-code$ greatest-lower-bound t1 t2)])
           (cond$
            [(op=? t1 t3) v]
            [else
@@ -1757,7 +1717,7 @@ TODO write unit tests
   (define (code-gen-mbox-cast/tuple e t2 n l)
     (let*$ ([v e]
             [t1 (Mbox-rtti-ref v)]
-            [t3 (greatest-lower-bound t1 t2)])
+            [t3 (app-code$ greatest-lower-bound t1 t2)])
       (cond$
        [(op=? t1 t3) v]
        [else
@@ -1776,7 +1736,7 @@ TODO write unit tests
   (define (code-gen-mbox-cast/non-tuple e t2 l)
     (let*$ ([v e]
             [t1 (Mbox-rtti-ref v)]
-            [t3 (greatest-lower-bound t1 t2)])
+            [t3 (app-code$ greatest-lower-bound t1 t2)])
       (cond$
        [(op=? t1 t3) v]
        [else
@@ -1838,7 +1798,7 @@ TODO write unit tests
 
 (: make-compile-mvec-cast
    (->* (#:interp-cast Cast-Type
-         #:greatest-lower-bound Greatest-Lower-Bound-Type)
+         #:greatest-lower-bound (Code-Label Uid))
         Monotonic-Cast-Type))
 (define (make-compile-mvec-cast
          #:interp-cast interp-cast
@@ -1850,7 +1810,7 @@ TODO write unit tests
        [(type-dyn?$ t2) v]
        [else
         (let*$ ([t1 (Mvector-rtti-ref v)]
-                [t3 (greatest-lower-bound t1 t2)])
+                [t3 (app-code$ greatest-lower-bound t1 t2)])
           (cond$
            [(op=? t1 t3) v]
            [else
@@ -1881,7 +1841,7 @@ TODO write unit tests
   (define (code-gen-mvec-cast/tuple e t2 n l)
     (let*$ ([v e] [t2 t2] [n n] [l l]
             [t1 (Mvector-rtti-ref v)]
-            [t3 (greatest-lower-bound t1 t2)])
+            [t3 (app-code$ greatest-lower-bound t1 t2)])
       (cond$
        [(op=? t1 t3) v]
        [else
@@ -1901,7 +1861,7 @@ TODO write unit tests
   (define (code-gen-mvec-cast/non-tuple e t2 l)
     (let*$ ([v e]
             [t1 (Mvector-rtti-ref v)]
-            [t3 (greatest-lower-bound t1 t2)])
+            [t3 (app-code$ greatest-lower-bound t1 t2)])
       (cond$
        [(op=? t1 t3) v]
        [else
